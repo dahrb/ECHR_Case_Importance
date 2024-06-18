@@ -1,2 +1,8 @@
 *.zip
 *.sh
+*.out
+*.pkl
+*.csv
+*.txt
+API_key.py
+Data/
