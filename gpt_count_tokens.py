@@ -2,7 +2,7 @@ import pandas as pd
 import tiktoken
 
 
-#Source - https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
+#Strating point for code is this guide - https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
 def num_tokens_from_string(data, zero_shot = True) -> int:
     """Returns the number of tokens in a text string."""
 
@@ -60,10 +60,9 @@ def num_tokens_from_string(data, zero_shot = True) -> int:
         print(f'Total Cost {embed}; zero-shot {zero_shot}: ${(cost_input + cost_output)/2:.2f} and £{((cost_input + cost_output)/0.78)/2:.2f}')
         print(f'Ablation Total cost ${ablation_cost/2:.2f} and £{(ablation_cost/0.78)/2:.2f}')
 
-data = pd.read_pickle('Data_1_0.pkl')
+if __name__ == '__main__':
 
-num_tokens_from_string(data)
-num_tokens_from_string(data,zero_shot=False)
+    data = pd.read_pickle('Data_1_0.pkl')
 
-
-#len(gpt_4.encode('hello world!'))
+    num_tokens_from_string(data)
+    num_tokens_from_string(data,zero_shot=False)
