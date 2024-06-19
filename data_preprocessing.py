@@ -1,5 +1,6 @@
 """
 Version history
+v1_1 = implements ability to sample specific cases to correspond with colleague's summarisation task
 v1_0 = implements following features: load data; create dataframe; preprocessing; prepare data for experiments; sample data for validation and test sets
 """
 
@@ -11,7 +12,16 @@ def sampleHelper(df, importance, size):
 
     return df[df['importance'] == importance].sample(size, random_state=154)
 
-def sample(df:pd.DataFrame, sampling_dist:list = [5,5,11,33]) -> pd.DataFrame:
+def sample(df:pd.DataFrame, sampling_dist:list = [4,4,10,32], appNos = []) -> pd.DataFrame:
+
+    '''
+    Function to sample the data based on the importance of the case
+
+    Parameters:
+    df: pd.DataFrame - the dataframe to sample from
+    sampling_dist: list - the distribution of the sampling for each importance level
+    appNos: list - the list of application numbers to sample if we want to include specific cases in our validation set
+    '''
 
     sample_list = []
 
@@ -25,7 +35,15 @@ def sample(df:pd.DataFrame, sampling_dist:list = [5,5,11,33]) -> pd.DataFrame:
         else:
             sample_list.append(sampleHelper(df, imp, sampling_dist[3]))
 
-    return pd.concat(sample_list)
+    if len(appNos) > 0:
+        sample_list.append(df[df['appno'].isin(appNos)])
+
+    # Check for duplicates in sample_list
+    df = pd.concat(sample_list)
+    if df.duplicated().any():
+        raise ValueError("Duplicates found in sample_list.")
+
+    return df
 
 def data_2_df(questions_dir, subject_matter_dir):
     
@@ -101,7 +119,7 @@ if __name__ == '__main__':
 
     df = link_outcome_labels(df)
 
-    sample_df = sample(df)
+    sample_df = sample(df,sampling_dist=[4,4,10,32] ,appNos=['6697/18','35589/08','12427/22','19866/21'])
 
     valid_data = sample_df[['Filename','Questions','Subject Matter','importance']]
 
