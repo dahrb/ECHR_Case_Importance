@@ -4,5 +4,6 @@
 *.pkl
 *.csv
 *.txt
+*.xlsx
 API_key.py
 Data/
