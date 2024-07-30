@@ -44,14 +44,18 @@ def download_batch_files(experiment_name,filepath):
     for i in client.batches.list():
         
         if i.metadata['description'].split(':')[0] == experiment_name:
+            #print(i.metadata['description'].split(':')[0])
             
             file_id = i.output_file_id
+            #print(file_id)
             batch_output_file = client.files.content(file_id).content
 
             with open(f'{filepath}/{i.metadata["description"].split(":")[1]}', "wb") as f:
                 f.write(batch_output_file)
     
 if __name__ == '__main__':
-    #send_to_api(filepath='./Batches/experiment_1_valid',experiment_desciption='Experiment 1 Valid_4: ')
+    #send all experiments in the folder to the api
+    send_to_api(filepath='./Batches/experiment_2_CoT',experiment_desciption='Experiment 2_CoT: ')
 
-    download_batch_files(experiment_name='Experiment 1 Valid_4',filepath='./Results/experiment_1_valid')
+    #uncomment and download the files after processing - maybe 5-10mins after running send_to_api
+    #download_batch_files(experiment_name='Experiment 2_CoT',filepath='./Results/experiment_2_CoT')

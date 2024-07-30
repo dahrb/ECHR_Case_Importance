@@ -8,6 +8,7 @@ v1_0 = provides estimate for gpt-4 costs from the dataset under certain assumpti
 import pandas as pd
 import tiktoken
 import os
+import os
 
 #Starting point for code is this guide - https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
 def num_tokens_from_string(data, zero_shot = True) -> int:
@@ -93,8 +94,14 @@ def num_tokens_from_jsonl(data,name,output_tokens = 15):
     cost_output = (output_tokens/1_000_000) * 15
 
     print(f'{name}:\n')
-    print(f"Number of input tokens in the text: {total_tokens}; estimated cost: ${cost_input/2:.2f} and £{(cost_input/0.78)/2:.2f}")
-    print(f"Number of output tokens (estimate): {output_tokens}; estimated cost: ${cost_output/2:.2f} and £{(cost_output/0.78)/2:.2f}")
+    print(f"Number of input tokens in the text: {total_tokens}; estimated cost: ${cost_input/2:.2f} and £{(cost_input*0.78)/2:.2f}")
+    print(f"Number of output tokens (estimate): {output_tokens}; estimated cost: ${cost_output/2:.2f} and £{(cost_output*0.78)/2:.2f}")
+
+    total_cost = (cost_input*0.78)/2 + (cost_output*0.78)/2
+
+    round(total_cost,2)
+
+    return total_cost
     
 if __name__ == '__main__':
 
@@ -104,12 +111,16 @@ if __name__ == '__main__':
     #num_tokens_from_string(data)
     #num_tokens_from_string(data,zero_shot=False)
 
+    filename = './Batches/experiment_sample'
+
     #num_tokens_from_jsonl EXAMPLE
-    for i in os.listdir('./Batches'):
+    for i in os.listdir(filename):
         if i.endswith('.jsonl'):
-            data = pd.read_json(f'./Batches/{i}',lines=True)
-            num_tokens_from_jsonl(data,name=i,output_tokens=15)
-            break
+            data = pd.read_json(f'{filename}/{i}',lines=True)
+            cost = num_tokens_from_jsonl(data,name=i,output_tokens=200)
+            # Delete files
+            if cost >= 1.50:
+                os.remove(os.path.join(filename, i))
     
 
 
