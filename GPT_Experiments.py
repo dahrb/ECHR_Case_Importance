@@ -521,26 +521,16 @@ def save_file(output,filepath,batch_name,prompt_type='first',experiment=1, zero_
 
 if __name__ == "__main__":
     
+    #connect to api key
     client = OpenAI(api_key=openai_key)
+    #read in validation data
     df = pd.read_pickle('valid_data.pkl')    
-
-    #CHAMBER EXPERIMENTS
-    #court_label_data = pd.read_pickle('Chamber_Data_2.pkl')
-    #pd.set_option('display.max_columns', None)
-    #df = pd.merge(df, court_label_data, on=['Filename','Questions','Subject Matter','importance'],how='left')
-    #df_example = generate_example_candidates(df,keyword='Court',labels =['Committee','Chamber'])
-
-    #print(df_main)
+    #cuut off the last 4 cases as they are the ones used for few-shot examples in this setup
     df_main = df[:-4]
     df_example = df[-4:]
-    #print(df_example)
 
-    #df_main = df.drop(df_example.index)
-
-    #print(len(df_main))
-  
-    # ASYNC EXAMPLE - EXPERIMENT 2
-    exp_2 = Experiment_2(df,content='both',grand_chamber=False,reasoning=True)
+    #set params for experiment being run
+    exp_2 = Experiment_2(df,content='both',grand_chamber=False,reasoning=False)
 
     #set param grid search
     grid = model_selection.ParameterGrid(PARAMETERS_4)
@@ -548,9 +538,24 @@ if __name__ == "__main__":
     for params in grid:
         #set examples
         examples = create_examples(df_example,text=params['text'],importance=False)
+        #create batch files for given prompt + parameters
         output = exp_2.run_async( schema=params['schema'],zero_shot=params['zero_shot'],text=params['text'],examples=examples,info=True,temperature=0,max_tokens=550)
+        #save batch file
         save_file(output,filepath='./Batches/experiment_2_CoT',batch_name='experiment_2_CoT',experiment = 2, zero_shot=params['zero_shot'],text=params['text'],schema=params['schema'])
 
+    #CHAMBER EXPERIMENTS
+    #court_label_data = pd.read_pickle('Chamber_Data_2.pkl')
+    #pd.set_option('display.max_columns', None)
+    #df = pd.merge(df, court_label_data, on=['Filename','Questions','Subject Matter','importance'],how='left')
+    #df_example = generate_example_candidates(df,keyword='Court',labels =['Committee','Chamber'])
+
+    #print(df)
+    #print(df_example)
+
+    #df_main = df.drop(df_example.index)
+
+    #print(len(df_main))
+  
     # ASYNC 
 
     # for i in range(20):
@@ -576,12 +581,5 @@ if __name__ == "__main__":
     #exp_1 = Experiment_1(df_main)
     #for num in ['first','second','third','fourth','fifth']:
     #    exp_1.run_async(filepath='./Batches/experiment_1_valid',batch_name='experiment_1',schema=JSON_SCHEMAS[2],prompt_type='first',temperature=0,max_tokens=500)  
-
-    #submit files to BATCH API
-    
-    # SYNC EXAMPLE
-    # output = exp_1.run_sync(JSON_SCHEMAS[0],'first',temperature=0,max_tokens=500)
-    # output.to_pickle('exp_1_output.pkl')
-    # print(output)
 
 

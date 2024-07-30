@@ -1,7 +1,6 @@
 *.zip
 *.sh
 *.out
-*.pkl
 *.csv
 *.txt
 *.xlsx
