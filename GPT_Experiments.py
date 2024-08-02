@@ -13,7 +13,6 @@ import os
 import json
 from sklearn import model_selection
 
-
 JSON_SCHEMAS = [{"Case Importance":"int (1-4)","Summary":"string (description of the case)","Reasoning":"string (give your reason for the importance)" },
                 {"Case Importance":"int (1-4)"},
                 {"Case Importance":"string (select one of: key_case, 1, 2, 3)"},

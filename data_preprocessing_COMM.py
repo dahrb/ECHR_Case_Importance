@@ -95,10 +95,10 @@ def preprocessing(df:pd.DataFrame):
 
     return df
 
-def link_outcome_labels(df:pd.DataFrame):
+def link_outcome_labels(df:pd.DataFrame,label_file = 'importance_labels.csv',data_directory = './Data/'):
 
     #link outcome label
-    labels = pd.read_csv(data_directory + 'importance_labels.csv')
+    labels = pd.read_csv(data_directory + label_file)
     labels = labels.rename(columns={'itemid':'Filename'})
 
     df = pd.merge(df, labels, on='Filename')
@@ -106,7 +106,10 @@ def link_outcome_labels(df:pd.DataFrame):
     return df
 
 if __name__ == '__main__':
-    
+
+    # Code to preprocess data for initial GPT-4o experiments
+    # Sample 50 cases with specified dist + 4 specific example cases for few shot
+    # Rest of data availiable as test data for prediction
     data_directory = './Data/'
 
     # Set the directory for the txt files

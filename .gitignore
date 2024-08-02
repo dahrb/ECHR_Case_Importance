@@ -6,3 +6,5 @@
 *.xlsx
 API_key.py
 Data/
+comm_cases.pkl
+outcome_cases.pkl
