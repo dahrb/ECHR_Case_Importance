@@ -96,9 +96,9 @@ def num_tokens_from_jsonl(data,name,output_tokens = 15):
     print(f'{name}:\n')
     print(f"Number of input tokens in the text: {total_tokens}; estimated cost: ${cost_input/2:.2f} and £{(cost_input*0.78)/2:.2f}")
     print(f"Number of output tokens (estimate): {output_tokens}; estimated cost: ${cost_output/2:.2f} and £{(cost_output*0.78)/2:.2f}")
-
+    
     total_cost = (cost_input*0.78)/2 + (cost_output*0.78)/2
-
+    print(f'Total Cost: ${total_cost:.2f} and £{total_cost/0.78:.2f}\n')
     round(total_cost,2)
 
     return total_cost
@@ -111,16 +111,13 @@ if __name__ == '__main__':
     #num_tokens_from_string(data)
     #num_tokens_from_string(data,zero_shot=False)
 
-    filename = './Batches/experiment_sample'
+    filename = './Summarize_Cases'
 
     #num_tokens_from_jsonl EXAMPLE
     for i in os.listdir(filename):
         if i.endswith('.jsonl'):
             data = pd.read_json(f'{filename}/{i}',lines=True)
-            cost = num_tokens_from_jsonl(data,name=i,output_tokens=200)
-            # Delete files
-            if cost >= 1.50:
-                os.remove(os.path.join(filename, i))
+            cost = num_tokens_from_jsonl(data,name=i,output_tokens=700)
     
 
 

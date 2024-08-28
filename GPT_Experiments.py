@@ -274,23 +274,23 @@ class Experiment_2(Experiment_1):
             case _:
                 raise ValueError('Invalid text value. Please enter a value between 1 and 3.')
 
-        if self.reasoning is False:
-            if zero_shot:
-                additional_context = ''
-            else:
-                #examples = [f'Importance: {i}\n{e}' for i, e in zip(row['importance'], examples)]
-                additional_context = f'''You are also given a number of examples for each level of importance. 
-                                        key_case: {examples[0]}; Level 1: {examples[1]}; Level 2: {examples[2]}; Level 3: {examples[3]}'''
+        #if self.reasoning is False:
+        if zero_shot:
+            additional_context = ''
         else:
-            if zero_shot:
-                additional_context = f'You are given a number of examples of how to reason for each level of importance: {JSON_REASONING}'
-            else:
-                additional_context = f''' You are given a number of paired examples for each level of importance containing the communicated case text and an example of the reasoning which may have led to the importance level:
-                                        key_case text: {examples[0]}; key_case reasoning: {JSON_REASONING['Reasoning for Key Case']};
-                                        Level 1 text: {examples[1]}; Level 1 reasoning: {JSON_REASONING['Reasoning for Level 1 Case']};
-                                        Level 2 text: {examples[2]}; Level 2 reasoning: {JSON_REASONING['Reasoning for Level 2 Case']};
-                                        Level 3 text: {examples[3]}; Level 3 reasoning: {JSON_REASONING['Reasoning for Level 3 Case']}
-                                        '''
+            #examples = [f'Importance: {i}\n{e}' for i, e in zip(row['importance'], examples)]
+            additional_context = f'''You are also given a number of examples for each level of importance. 
+                                        key_case: {examples[0]}; Level 1: {examples[1]}; Level 2: {examples[2]}; Level 3: {examples[3]}'''
+        # else:
+        #     if zero_shot:
+        #         additional_context = f'You are given a number of examples of how to reason for each level of importance: {JSON_REASONING}'
+        #     else:
+        #         additional_context = f''' You are given a number of paired examples for each level of importance containing the communicated case text and an example of the reasoning which may have led to the importance level:
+        #                                 key_case text: {examples[0]}; key_case reasoning: {JSON_REASONING['Reasoning for Key Case']};
+        #                                 Level 1 text: {examples[1]}; Level 1 reasoning: {JSON_REASONING['Reasoning for Level 1 Case']};
+        #                                 Level 2 text: {examples[2]}; Level 2 reasoning: {JSON_REASONING['Reasoning for Level 2 Case']};
+        #                                 Level 3 text: {examples[3]}; Level 3 reasoning: {JSON_REASONING['Reasoning for Level 3 Case']}
+        #                                 '''
 
         # importance_levels = '''1: These are the most important and have been selected as key cases and have been selected for publication in the Court\'s official reports; 
         #                     2: The case is of high importance. The case makes a significant contribution to the development, clarification or modification of its case law, either generally or in relation to a particular case; 
@@ -312,13 +312,13 @@ class Experiment_2(Experiment_1):
         You will be given a communicated case, including the {text_amount}.
         You are given a description of the different levels of importance: {importance_levels}.
         {additional_context}.
-        Based on the information given to you, as well as any relevant case law from the European Court of Human Rights, predict the importance of the case according to the criteria given. 
+        Based on the information given to you predict the importance of the case according to the criteria given. 
         {state_info}
         The output should be given directly in JSON format, with the following schema: {schema}.
         The communicated case information you should base your judgement on is as follows: {text}.
         '''
         if self.reasoning:
-            prompt += ' Ensure when giving your reason you think through it step by step similarly to the example reasoning provided'
+            prompt += ' Ensure when giving your reason you think through it step by step and provide a clear and concise explanation for your choice.'
 
         return prompt
     
@@ -495,10 +495,10 @@ def create_examples(data,text,importance = True):
                 
     return examples
 
-def generate_example_candidates(data,keyword,labels):
+def generate_example_candidates(data,keyword,labels, random_state=42):
     example_candidates = pd.DataFrame(columns=data.columns)
     for i in range(len(labels)):
-        row = data[data[keyword]==labels[i]].sample(1, random_state=42,axis=0)
+        row = data[data[keyword]==labels[i]].sample(1, random_state=random_state,axis=0)
         example_candidates = pd.concat([example_candidates,row],axis=0)
     #print(example_candidates)
     return example_candidates
