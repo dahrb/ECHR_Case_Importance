@@ -17,9 +17,10 @@ def send_to_api(filepath,experiment_desciption):
     Experiment_description naming conventions =
         'Experiment {number} {type}:'
     '''
-    
     for i in os.listdir(f'{filepath}'):
+
         if i.endswith('.jsonl'):
+
             batch_input_file = client.files.create(
                 file=open(filepath+f"/{i}", "rb"),
                 purpose="batch"
@@ -42,20 +43,25 @@ def download_batch_files(experiment_name,filepath):
     '''
 
     for i in client.batches.list():
+
+        #print(i.metadata['description'].split(':')[0])
+
         
         if i.metadata['description'].split(':')[0] == experiment_name:
-            #print(i.metadata['description'].split(':')[0])
             
             file_id = i.output_file_id
             #print(file_id)
-            batch_output_file = client.files.content(file_id).content
-
+            try:
+                batch_output_file = client.files.content(file_id).content
+            except:
+                continue
             with open(f'{filepath}/{i.metadata["description"].split(":")[1]}', "wb") as f:
                 f.write(batch_output_file)
+
     
 if __name__ == '__main__':
     #send all experiments in the folder to the api
-    send_to_api(filepath='./Batches/experiment_2_CoT',experiment_desciption='Experiment 2_CoT: ')
+    #send_to_api(filepath='/users/sgdbareh/volatile/ECHR_Importance/Summarize_Cases/',experiment_desciption='summaries NEW TRAIN_TEST: ')
 
     #uncomment and download the files after processing - maybe 5-10mins after running send_to_api
-    #download_batch_files(experiment_name='Experiment 2_CoT',filepath='./Results/experiment_2_CoT')
+    download_batch_files(experiment_name='summaries NEW TRAIN_TEST',filepath='/users/sgdbareh/volatile/ECHR_Importance/Summarize_Cases/Results')
