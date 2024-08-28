@@ -25,7 +25,7 @@ client = OpenAI(api_key=openai_key)
 # Load the data
 data = pd.read_pickle('/users/sgdbareh/volatile/ECHR_Importance/VectorDB/test.pkl')
 
-train_data = pd.read_pickle('/users/sgdbareh/volatile/ECHR_Importance/Vector_DB/test.pkl')
+train_data = pd.read_pickle('/users/sgdbareh/volatile/ECHR_Importance/VectorDB/train.pkl')
 
 #set param grid search
 grid = model_selection.ParameterGrid(PARAMETERS)
