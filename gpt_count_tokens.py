@@ -98,7 +98,7 @@ def num_tokens_from_jsonl(data,name,output_tokens = 15):
     print(f"Number of output tokens (estimate): {output_tokens}; estimated cost: ${cost_output/2:.2f} and £{(cost_output*0.78)/2:.2f}")
     
     total_cost = (cost_input*0.78)/2 + (cost_output*0.78)/2
-    print(f'Total Cost: ${total_cost:.2f} and £{total_cost/0.78:.2f}\n')
+    print(f'Total Cost: ${total_cost:.2f} and £{total_cost*0.78:.2f}\n')
     round(total_cost,2)
 
     return total_cost
@@ -111,13 +111,15 @@ if __name__ == '__main__':
     #num_tokens_from_string(data)
     #num_tokens_from_string(data,zero_shot=False)
 
-    filename = './Summarize_Cases'
+    filename = '/users/sgdbareh/volatile/ECHR_Importance/PREDICTION/batches'
 
     #num_tokens_from_jsonl EXAMPLE
+    total_cost = 0
     for i in os.listdir(filename):
         if i.endswith('.jsonl'):
             data = pd.read_json(f'{filename}/{i}',lines=True)
-            cost = num_tokens_from_jsonl(data,name=i,output_tokens=700)
-    
+            cost = num_tokens_from_jsonl(data,name=i,output_tokens=500)
+            total_cost += cost
+    print(f'Total Cost: ${total_cost:.2f} and £{total_cost*0.78:.2f}\n')
 
 

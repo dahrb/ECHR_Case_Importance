@@ -61,7 +61,7 @@ def download_batch_files(experiment_name,filepath):
     
 if __name__ == '__main__':
     #send all experiments in the folder to the api
-    #send_to_api(filepath='/users/sgdbareh/volatile/ECHR_Importance/Summarize_Cases/',experiment_desciption='summaries NEW TRAIN_TEST: ')
+    send_to_api(filepath='/users/sgdbareh/volatile/ECHR_Importance/PREDICTION/batches',experiment_desciption='Prediction_Baselines: ')
 
     #uncomment and download the files after processing - maybe 5-10mins after running send_to_api
-    download_batch_files(experiment_name='summaries NEW TRAIN_TEST',filepath='/users/sgdbareh/volatile/ECHR_Importance/Summarize_Cases/Results')
+    #download_batch_files(experiment_name='Prediction_Baselines',filepath='filepath='/users/sgdbareh/volatile/ECHR_Importance/PREDICTION/Results')
