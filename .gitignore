@@ -6,7 +6,9 @@
 *.xlsx
 *.bin
 *.pkl
+*.error
 *.jsonl
+jobs/logs/
 BERT-rerank/model*
 API_key.py
 Data/overlap_cases/
