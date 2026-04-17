@@ -9,7 +9,7 @@
 *.jsonl
 BERT-rerank/model*
 API_key.py
-Data/
+Data/overlap_cases/
 Art_3_Data/
 exp_1_output.pkl
 bert-sentence-transformer/
@@ -37,3 +37,10 @@ models/
 cmake-*.tar.gz
 Knowledge_Graph/subgraph*.html
 example.html
+
+# Article data directories — generated/downloaded content, not source
+articles/*/raw_metadata/
+articles/*/overlap_cases/
+articles/*/corpora/
+articles/*/*.pkl
+articles/*/importance_labels.csv
