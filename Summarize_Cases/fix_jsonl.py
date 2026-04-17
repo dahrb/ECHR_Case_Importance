@@ -19,6 +19,6 @@ def fix_jsonl_file(input_file, output_file):
             #application inadmissible.\"\n}", "refusal"#': null},
             #application inadmissible.\"\n}."}, "refusal": null}
 
-input_file = '/users/sgdbareh/volatile/ECHR_Importance/Summarize_Cases/Results/split_2.jsonl'
-output_file = '/users/sgdbareh/volatile/ECHR_Importance/Summarize_Cases/Results/split_2_fixed.jsonl'
+input_file = '/users/sgdbareh/volatile/ECHR_Importance/Summarize_Cases/comm_test/outcome_final_cases_2.jsonl'
+output_file = '/users/sgdbareh/volatile/ECHR_Importance/Summarize_Cases/comm_test/outcome_final_cases_2_fixed.jsonl'
 fix_jsonl_file(input_file, output_file)

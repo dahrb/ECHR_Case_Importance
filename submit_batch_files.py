@@ -58,10 +58,9 @@ def download_batch_files(experiment_name,filepath):
             with open(f'{filepath}/{i.metadata["description"].split(":")[1]}', "wb") as f:
                 f.write(batch_output_file)
 
-    
 if __name__ == '__main__':
     #send all experiments in the folder to the api
-    send_to_api(filepath='/users/sgdbareh/volatile/ECHR_Importance/PREDICTION/batches',experiment_desciption='Prediction_Baselines: ')
+    #send_to_api(filepath='/users/sgdbareh/volatile/ECHR_Importance/PREDICTION/batches/BASELINES_NEW/iter',experiment_desciption='iter_zs_bs: ')
 
     #uncomment and download the files after processing - maybe 5-10mins after running send_to_api
-    #download_batch_files(experiment_name='Prediction_Baselines',filepath='filepath='/users/sgdbareh/volatile/ECHR_Importance/PREDICTION/Results')
+    download_batch_files(experiment_name='iter_zs_bs',filepath='/users/sgdbareh/volatile/ECHR_Importance/PREDICTION/Results/BASELINES_NEW')

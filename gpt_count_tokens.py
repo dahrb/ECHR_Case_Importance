@@ -4,7 +4,6 @@ v1_1 = provides estimate for JSONL file required for batch api
 v1_0 = provides estimate for gpt-4 costs from the dataset under certain assumptions
 """
 
-
 import pandas as pd
 import tiktoken
 import os
@@ -91,14 +90,14 @@ def num_tokens_from_jsonl(data,name,output_tokens = 15):
     cost_input =  (total_tokens/1_000_000) * 5 
 
     output_tokens = output_tokens*len(data)
-    cost_output = (output_tokens/1_000_000) * 15
+    cost_output = (output_tokens/1_000_000) * 10
 
-    print(f'{name}:\n')
-    print(f"Number of input tokens in the text: {total_tokens}; estimated cost: ${cost_input/2:.2f} and £{(cost_input*0.78)/2:.2f}")
-    print(f"Number of output tokens (estimate): {output_tokens}; estimated cost: ${cost_output/2:.2f} and £{(cost_output*0.78)/2:.2f}")
+    #print(f'{name}:\n')
+    #print(f"Number of input tokens in the text: {total_tokens}; estimated cost: ${cost_input/2:.2f} and £{(cost_input*0.78)/2:.2f}")
+    #print(f"Number of output tokens (estimate): {output_tokens}; estimated cost: ${cost_output/2:.2f} and £{(cost_output*0.78)/2:.2f}")
     
     total_cost = (cost_input*0.78)/2 + (cost_output*0.78)/2
-    print(f'Total Cost: ${total_cost:.2f} and £{total_cost*0.78:.2f}\n')
+    #print(f'Total Cost: ${total_cost:.2f} and £{total_cost*0.78:.2f}\n')
     round(total_cost,2)
 
     return total_cost
@@ -111,7 +110,7 @@ if __name__ == '__main__':
     #num_tokens_from_string(data)
     #num_tokens_from_string(data,zero_shot=False)
 
-    filename = '/users/sgdbareh/volatile/ECHR_Importance/PREDICTION/batches'
+    filename = '/users/sgdbareh/volatile/ECHR_Importance/PREDICTION/batches/TEST_SEMANTIC_RELEVANCE'
 
     #num_tokens_from_jsonl EXAMPLE
     total_cost = 0
@@ -121,5 +120,3 @@ if __name__ == '__main__':
             cost = num_tokens_from_jsonl(data,name=i,output_tokens=500)
             total_cost += cost
     print(f'Total Cost: ${total_cost:.2f} and £{total_cost*0.78:.2f}\n')
-
-

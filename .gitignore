@@ -7,9 +7,7 @@
 *.bin
 *.pkl
 *.jsonl
-BERT-rerank/model2024-08-28_15-14-44_fold_1/
-BERT-rerank/model2024-08-28_15-14-44_fold_2/
-BERT-rerank/model2024-08-28_15-14-44_fold_3/
+BERT-rerank/model*
 API_key.py
 Data/
 Art_3_Data/
@@ -26,3 +24,16 @@ legal-bert_raw_sentence_transformer_model/
 longformer_raw_sentence_transformer_model/
 Batches/
 Results/
+echr/
+Llama-3/llama-files
+Knowledge_Graph/archive models
+Knowledge_Graph/lib
+Knowledge_Graph/processed
+Knowledge_Graph/wikipedia
+*.pthmodels/
+models/
+*.gml
+*.gguf
+cmake-*.tar.gz
+Knowledge_Graph/subgraph*.html
+example.html

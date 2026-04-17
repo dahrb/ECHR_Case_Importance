@@ -1,5 +1,6 @@
 """
 Version history:
+v1_4 = Added RAG Experiments 
 v1_3 = Implemented CoT experiments
 v1_2 = Implemented variations on Experiment 2
 v1_1 = Experiment 2 implementation
@@ -27,6 +28,7 @@ JSON_SCHEMAS = [{"Case Importance":"int (1-4)","Summary":"string (description of
                 {"Court":"string (Committee or Chamber)","Summary":"string (brief description of the case)","Reasoning":"string (give your reason for the importance)" },
                 {"Court":"string (Committee or Chamber)"},
                 {"Case Importance":"string (select one of: key_case, 1, 2, 3)","Reasoning":"string (give your reason for the importance)" },
+                {"Case Importance Under Consideration": "string (select one of: key_case, 1, 2, 3)","Confidence in Importance Ascription": "int 1-100", "Reasoning": "string (give your reason for or against the importance)" }
 ]
 
 PARAMETERS = {'schema':[JSON_SCHEMAS[0],JSON_SCHEMAS[1]],
@@ -136,8 +138,12 @@ class Experiment_1():
                 prompt = self.get_court_prompt(self.data.iloc[file], schema, prompt_type=prompt_type, zero_shot=zero_shot, text=text, examples=examples, info=info)
             elif self.binary == 'chamber_court':
                 prompt = self.get_chamber_prompt(self.data.iloc[file], schema, prompt_type=prompt_type, zero_shot=zero_shot, text=text, examples=examples, info=info, grand_chamber=self.grand_chamber)
+            elif self.binary == 'RAG':
+                prompt = self.get_rag_prompt(self.data.iloc[file], schema, prompt_type=prompt_type, zero_shot=zero_shot, text=text, examples=examples, info=info)
+            elif self.binary == 'iterative':
+                prompt = self.get_rag_prompt(self.data.iloc[file], schema, prompt_type=prompt_type, zero_shot=zero_shot, text=text, examples=examples, info=info)
             else:
-                prompt = self.get_prompt(self.data.iloc[file], schema, prompt_type=prompt_type, zero_shot=zero_shot, text=text, examples=examples, info=info)
+                prompt = self.get_prompt(self.data.iloc[file], schema, zero_shot=zero_shot, text=text, examples=examples, info=info)
             id = self.data.iloc[file]['Filename']
             template = {"custom_id": f'{id}', "method": "POST", "url": "/v1/chat/completions", "body": {"model": "gpt-4o", "messages": [{"role": "user", "content": prompt}],'response_format':{'type': 'json_object'},'max_tokens':max_tokens,'temperature':temperature,'top_p':top_p, 'seed':42}}
 
@@ -208,6 +214,8 @@ class Experiment_1():
         raise TypeError('Court prompt not available for Experiment 1')
     def get_chamber_prompt():
         raise TypeError('Chamber prompt not available for Experiment 1')
+    def get_rag_prompt():
+        raise TypeError('RAG prompt not available for Experiment 1')
     
 class Experiment_2(Experiment_1):
 
@@ -236,7 +244,7 @@ class Experiment_2(Experiment_1):
             case 'both':
                 self.data = self.data[['Filename','Questions','Subject Matter']]    
 
-    def get_prompt(self, row,schema:dict = JSON_SCHEMAS[2], zero_shot:bool =True, text:int = 3, examples:list = [], info:bool=True, prompt_type:str='first'):
+    def get_prompt(self, row,schema:dict = JSON_SCHEMAS[2], zero_shot:bool =True, text:int = 3, examples:list = [], info:bool=True):
 
         '''Function to generate a prompt for the GPT-4o model.
         
@@ -308,6 +316,7 @@ class Experiment_2(Experiment_1):
 
         prompt = f''' 
         You are a lawyer in the European Court of Human Rights, and your goal is to predict the importance of a case, based on information provided from a communicated case. Importance in a legal setting refers to the significance of a case in terms of its impact on the development of case law.
+        All the cases concern Article 3 of the European Convention of Human Rights, about the prohibition of torture.
         The following information is provided to you:
         You will be given a communicated case, including the {text_amount}.
         You are given a description of the different levels of importance: {importance_levels}.
@@ -321,7 +330,160 @@ class Experiment_2(Experiment_1):
             prompt += ' Ensure when giving your reason you think through it step by step and provide a clear and concise explanation for your choice.'
 
         return prompt
-    
+
+    def get_iterative_prompt(self, row,schema:dict = JSON_SCHEMAS[2], zero_shot:bool =True, text:int = 3, examples:list = [], info:bool=True):
+
+        '''Function to generate a prompt for the GPT-4o model.
+        
+        Parameters: 
+        row: pd.Series
+            A row from the dataframe containing the data.
+        zero_shot: bool
+            A boolean to determine if the prompt is for zero-shot learning.
+        text: int
+            The section/s of the text to include in the prompt:
+                1 = Subject Matter
+                2 = Questions
+                3 = Both
+        examples: list
+            A list of the examples to include in the prompt.
+            
+        Returns:
+        prompt: str
+            The prompt to be used for the GPT-4o model.
+        '''
+
+        match text:
+            case 1:
+                text = row['Subject Matter']
+                text_amount = 'subject matter of the case'
+            case 2:
+                text = row['Questions']
+                text_amount = 'questions asked to the parties'
+            case 3:
+                text = row['Subject Matter'] + ' ' + row['Questions']
+                text_amount = 'subject matter of the case and the questions asked to the parties'
+            case 4:
+                text = row['Case Summary']
+                text_amount = 'case summary'
+            case _:
+                raise ValueError('Invalid text value. Please enter a value between 1 and 3.')
+
+        #if self.reasoning is False:
+        if zero_shot:
+            additional_context = ''
+        else:
+            #examples = [f'Importance: {i}\n{e}' for i, e in zip(row['importance'], examples)]
+            additional_context = f'''You are also given a number of examples for each level of importance. 
+                                        key_case: {examples[0]}; Level 1: {examples[1]}; Level 2: {examples[2]}; Level 3: {examples[3]}'''
+            
+        importance_levels = '''key_case: These are the most important and have been selected as key cases and have been selected for publication in the Court\'s official reports; 
+                               1: The case is of high importance. The case makes a significant contribution to the development, clarification or modification of its case law, either generally or in relation to a particular case; 
+                               2: The case is of medium importance. The case while not making a significant contribution to the case-law, nevertheless it goes beyond merely applying existing case law; 
+                               3: The case is of low importance. The case is of limited interest and simply applies existing case law''''''
+                            '''
+        if info:
+            state_info = 'If you do not know the importance, state that you do not have enough information.'
+        else:
+            state_info = ''
+
+        prompt = f''' 
+        You are a lawyer in the European Court of Human Rights, and your goal is to predict the importance of a case, based on information provided from a communicated case. Importance in a legal setting refers to the significance of a case in terms of its impact on the development of case law.
+        All the cases concern Article 3 of the European Convention of Human Rights, about the prohibition of torture.
+        The following information is provided to you:
+        You will be given a communicated case, including the {text_amount}.
+        You are given a description of the different levels of importance: {importance_levels}.
+        {additional_context}.
+        Based on the information given to you predict the importance of the case according to the criteria given. 
+        {state_info}
+        The output should be given directly in JSON format, with the following schema: {schema}.
+        The communicated case information you should base your judgement on is as follows: {text}.
+        '''
+        if self.reasoning:
+            prompt += ' Ensure when giving your reason you think through it step by step and provide a clear and concise explanation for your choice.'
+
+        return prompt
+
+    def get_rag_prompt(self, row,schema:dict = JSON_SCHEMAS[2], zero_shot:bool =True, text:int = 1, examples:list = [], info:bool=True):
+
+        '''Method to generate a prompt for the GPT-4o model using RAG.
+        
+        Parameters: 
+        row: pd.Series
+            A row from the dataframe containing the data.
+        zero_shot: bool
+            A boolean to determine if the prompt is for zero-shot learning.
+        text: int
+            The section/s of the text to include in the prompt:
+                1 = Subject Matter
+                2 = Questions
+                3 = Both
+        examples: list
+            A list of the examples to include in the prompt.
+            
+        Returns:
+        prompt: str
+            The prompt to be used for the GPT-4o model.
+        '''
+
+
+        examples_str = ""
+        for example, importance in examples.items():
+            importance = {1:'key_case', 2:'1', 3:'2', 4:'3'}[importance]
+
+            examples_str += f"{example} The importance level for that case was {importance}.\n"
+
+        match text:
+            case 1:
+                text = row['Subject Matter']
+                text_amount = 'subject matter of the case'
+            case 2:
+                text = row['Questions']
+                text_amount = 'questions asked to the parties'
+            case 3:
+                text = row['Subject Matter'] + ' ' + row['Questions']
+                text_amount = 'subject matter of the case and the questions asked to the parties'
+            case 4:
+                text = row['Case Summary']
+                text_amount = 'case summary'
+            case _:
+                raise ValueError('Invalid text value. Please enter a value between 1 and 3.')
+
+        #if self.reasoning is False:
+        if zero_shot:
+            additional_context = ''
+
+        else:
+            #examples = [f'Importance: {i}\n{e}' for i, e in zip(row['importance'], examples)]
+            additional_context = f'''You are also given summaries of a number of relevant cases and their importance levels, consider these cases carefully when making your decision. 
+                                    {examples_str}  '''
+       
+        importance_levels = '''key_case: These are the most important and have been selected as key cases and have been selected for publication in the Court\'s official reports; 
+                               1: The case is of high importance. The case makes a significant contribution to the development, clarification or modification of its case law, either generally or in relation to a particular case; 
+                               2: The case is of medium importance. The case while not making a significant contribution to the case-law, nevertheless it goes beyond merely applying existing case law; 
+                               3: The case is of low importance. The case is of limited interest and simply applies existing case law'''
+        if info:
+            state_info = 'If you do not know the importance, state that you do not have enough information.'
+        else:
+            state_info = ''
+
+        prompt = f''' 
+        You are a lawyer in the European Court of Human Rights, and your goal is to predict the importance of a case, based on information provided from a communicated case. Importance in a legal setting refers to the significance of a case in terms of its impact on the development of case law.
+        All the cases concern Article 3 of the European Convention of Human Rights, about the prohibition of torture.
+        The following information is provided to you:
+        You will be given a communicated case, including the {text_amount}.
+        You are given a description of the different levels of importance: {importance_levels}.
+        {additional_context}
+        Based on the information given to you predict the importance of the case according to the criteria given. 
+        {state_info}
+        The output should be given directly in JSON format, with the following schema: {schema}.
+        The communicated case information you should base your judgement on is as follows: {text}
+        '''
+        if self.reasoning:
+            prompt += ' Ensure when giving your reason you think through it step by step and provide a clear and concise explanation for your choice.'
+        #print(prompt)
+        return prompt
+
     def get_binary_prompt(self, row,schema:dict = JSON_SCHEMAS[3], zero_shot:bool =True, text:int = 3, examples:list = [], info:bool=True, prompt_type:str='first'):
 
 
@@ -513,10 +675,15 @@ def save_file(output,filepath,batch_name,prompt_type='first',experiment=1, zero_
         with open(f'{filepath}/{batch_name}_{prompt_type}.jsonl', 'w') as f:
             for item in output:
                 f.write(json.dumps(item) + '\n')
-    else:
+    elif experiment == 2:
         with open(f'{filepath}/{batch_name}_{zero_shot}_{text}_{JSON_SCHEMAS.index(schema)}_{identifier}.jsonl', 'w') as f:
             for item in output:
                 f.write(json.dumps(item) + '\n')
+    else:
+        with open(f'{filepath}/{batch_name}.jsonl', 'w') as f:
+            for item in output:
+                f.write(json.dumps(item) + '\n')
+
 
 if __name__ == "__main__":
     

@@ -13,7 +13,7 @@ def save_file(output,filepath,batch_name):
         for item in output:
             f.write(json.dumps(item) + '\n')
 
-def prep_prompt(data, max_tokens=1500, temperature=0, top_p=1, prompt_type = 'comm'):
+def prep_prompt(data, max_tokens=1500 , temperature=0, top_p=1, prompt_type = 'comm'):
     
     output = []
 
@@ -74,6 +74,10 @@ def outcome_prompt_generation(row,schema:dict = JSON_SCHEMAS[0]):
     prompt: str
         The prompt to be used for the GPT-4o model.
     '''
+    try:
+        law = row['The Law']
+    except:
+        law = "The Law section is not available for this case due to token limits."
 
     prompt = f''' 
     You are a lawyer in the European Court of Human Rights, and your goal is to summarise outcome cases.
@@ -82,7 +86,7 @@ def outcome_prompt_generation(row,schema:dict = JSON_SCHEMAS[0]):
     with a maximum word count of 200 words and another with a maximum word count of 500 words. The summaries should be concise and capture the key aspects of the case.
     The case relates to Article 3 of the European Convention of Human Rights, concerning the prohibition of torture.
     The 'Facts' section of the case is: {row['Facts']}.
-    The 'The Law' section of the case is: {row['The Law']}.
+    The 'The Law' section of the case is: {law}.
     The output should be given directly in JSON format, with the following schema: {schema}.
     '''
 

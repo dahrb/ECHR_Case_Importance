@@ -138,7 +138,9 @@ def select_embedding(embedding_name, chunk_size, chunk_overlap, short_name=None)
 
 
 if __name__ == '__main__':
-    comm_cases = pd.read_pickle('/users/sgdbareh/volatile/ECHR_Importance/VectorDB/train.pkl')
+    #comm_cases = pd.read_pickle('/users/sgdbareh/volatile/ECHR_Importance/VectorDB/train.pkl')
+    comm_cases = pd.read_pickle('/users/sgdbareh/volatile/ECHR_Importance/VectorDB/test.pkl')
+
     #comm_cases = comm_cases[:1]
     #read in from arguments
     parser = OptionParser(usage='usage: -c chunk_size -o chunk_overlap -e embedding_name -n short_name -s similarity')   

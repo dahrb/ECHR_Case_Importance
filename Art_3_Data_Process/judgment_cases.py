@@ -1,6 +1,7 @@
 """
 Version history
 v1_0 = creates the outcome text data for Article 3
+v1_1 OUT-OF-DATE DO NOT USE UPDATE FROM data_process_draft.ipynb
 """
 
 #Column Guide -
@@ -83,7 +84,7 @@ df_merged['date'] = pd.to_datetime(df_merged['date'], format='%Y-%m-%d')
 df_merged = df_merged[df_merged['date'] >= '1995-01-01']
 
 #create columns for metadata .json
-metadata = pd.DataFrame(columns=['itemid','appno','doctypebranch','respondent','decisiondate','extractedappno','conclusion','importance','kpthesaurus','judgementdate'])
+metadata = pd.DataFrame(columns=['itemid','appno','doctypebranch','respondent','decisiondate','extractedappno','conclusion','importance','kpthesaurus','judgementdate','sclappnos'])
 
 #load metadata
 for file in os.listdir('/users/sgdbareh/volatile/ECHR_Importance/raw_case_metadata'):
@@ -96,7 +97,7 @@ for file in os.listdir('/users/sgdbareh/volatile/ECHR_Importance/raw_case_metada
 metadata.reset_index(drop=True,inplace=True)
 
 #filter out unneeded columns
-filtered_metadata = metadata.iloc[:, :10]
+filtered_metadata = metadata.iloc[:, :11]
 
 #convert dates to datetime
 filtered_metadata['judgementdate'] =  pd.to_datetime(filtered_metadata['judgementdate'],format='%d/%m/%Y %H:%M:%S').dt.date
