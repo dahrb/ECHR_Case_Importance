@@ -46,7 +46,7 @@ spec.loader.exec_module(cfg)
 print(f'Processing outcome cases for {cfg.ARTICLE_NAME}')
 
 # ---------------------------------------------------------------------------
-# Load text from ECHR-OD corpus
+# Load text from judgment corpus
 # ---------------------------------------------------------------------------
 corpus_dir = os.path.join(ARTICLE_DIR, 'corpora', 'outcome')
 
@@ -92,8 +92,11 @@ df_merged = df_merged[df_merged['date'] >= '1995-01-01']
 
 # ---------------------------------------------------------------------------
 # Load metadata from raw_metadata (s1 output)
+# Falls back to repo-root raw_case_metadata/ if article-level dir is empty
 # ---------------------------------------------------------------------------
 raw_meta_dir = os.path.join(ARTICLE_DIR, 'raw_metadata')
+if not any(f.endswith('.json') for f in os.listdir(raw_meta_dir) if os.path.exists(raw_meta_dir)):
+    raw_meta_dir = 'raw_case_metadata'
 metadata_frames = []
 for fname in os.listdir(raw_meta_dir):
     if fname.endswith('.json'):

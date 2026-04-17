@@ -44,3 +44,4 @@ articles/*/overlap_cases/
 articles/*/corpora/
 articles/*/*.pkl
 articles/*/importance_labels.csv
+.venv/

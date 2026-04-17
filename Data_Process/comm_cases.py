@@ -74,24 +74,56 @@ df = dpc.link_outcome_labels(df,
                               data_directory=ARTICLE_DIR + os.sep)
 
 # ---------------------------------------------------------------------------
-# Merge kpthesaurus from COMMUNICATEDCASES overlap metadata
+# Merge kpthesaurus from the JUDGMENT overlap metadata
+# (matches the original pipeline: key_words_keys in important_labels.csv was
+#  the kpthesaurus of the matched judgment, not the communicated case)
 # ---------------------------------------------------------------------------
+
+# Also pull doc_date from the communicated case metadata for the date column
 comm_meta_path = os.path.join(ARTICLE_DIR, 'overlap_cases', 'pruned_COMMUNICATEDCASES_meta.json')
 if os.path.exists(comm_meta_path):
-    meta = pd.read_json(comm_meta_path, lines=True)[['itemid', 'kpthesaurus', 'kpdate']]
-    meta.rename(columns={'itemid': 'Filename', 'kpdate': 'doc_date'}, inplace=True)
-    df = pd.merge(df, meta, on='Filename', how='left')
+    comm_meta = pd.read_json(comm_meta_path, lines=True)[['itemid', 'kpdate']]
+    comm_meta.rename(columns={'itemid': 'Filename', 'kpdate': 'doc_date'}, inplace=True)
+    df = pd.merge(df, comm_meta, on='Filename', how='left')
 else:
-    print(f'Warning: {comm_meta_path} not found — kpthesaurus unavailable, skipping keyword filter.')
-    df['kpthesaurus'] = ''
     df['doc_date'] = pd.NaT
 
+# Load all judgment overlap metadata and index by appno so we can look up
+# the judgment's kpthesaurus for each communicated case
+judgment_files = [
+    'pruned_GRANDCHAMBER_meta.json',
+    'pruned_CHAMBER_meta.json',
+    'pruned_COMMITTEE_meta.json',
+    'pruned_DECGRANDCHAMBER_meta.json',
+    'pruned_ADMISSIBILITY_meta.json',
+    'pruned_ADMISSIBILITYCOM_meta.json',
+]
+overlap_dir = os.path.join(ARTICLE_DIR, 'overlap_cases')
+judgment_frames = []
+for jf in judgment_files:
+    jpath = os.path.join(overlap_dir, jf)
+    if os.path.exists(jpath):
+        jdf = pd.read_json(jpath, lines=True)[['appno', 'kpthesaurus']]
+        judgment_frames.append(jdf)
+
+if judgment_frames:
+    judgment_meta = pd.concat(judgment_frames, ignore_index=True)
+    # Keep first match per appno (mirrors s3's priority order)
+    judgment_meta = judgment_meta.drop_duplicates(subset='appno', keep='first')
+    judgment_kp = dict(zip(judgment_meta['appno'], judgment_meta['kpthesaurus'].fillna('')))
+else:
+    judgment_kp = {}
+    print('Warning: no judgment overlap metadata found — keyword filter will be empty.')
+
+df['kpthesaurus'] = df['appno'].map(judgment_kp).fillna('')
+
 # ---------------------------------------------------------------------------
-# Filter to article-specific keywords
+# Filter to article-specific keywords (using judgment kpthesaurus, matching
+# the original Art_3_Data_Process/comm_cases.py behaviour)
 # ---------------------------------------------------------------------------
 article_keywords = cfg.KEYWORDS
 
-df['keyword_num'] = df['kpthesaurus'].fillna('').apply(
+df['keyword_num'] = df['kpthesaurus'].apply(
     lambda x: [k.strip() for k in x.split(';') if k.strip()])
 
 df_article = df[df['keyword_num'].apply(

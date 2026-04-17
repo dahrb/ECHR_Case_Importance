@@ -1,0 +1,108 @@
+[project]
+name = "echr-importance"
+version = "0.1.0"
+description = "ECHR case importance prediction pipeline"
+readme = "README.md"
+requires-python = ">=3.12"
+
+# Core dependencies — required by all pipeline scripts (s1-s5, Data_Process/)
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "tqdm>=4.66",
+    "openai>=1.30",
+    "tiktoken>=0.7",
+    "scikit-learn>=1.4",
+]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Optional dependency groups
+#   Install with:  uv sync --group <name>
+#
+#   nlp       — transformers, sentence-transformers (BERT models, reranking)
+#   retrieval — FAISS + LangChain (VectorDB/ experiments)
+#   graph     — PyTorch + PyG (Knowledge_Graph/network_TGN.py) — CPU build
+#               for GPU replace with: uv sync --group graph-gpu
+#   notebooks — Jupyter + plotting
+#   dev       — linting / testing
+# ──────────────────────────────────────────────────────────────────────────────
+
+[dependency-groups]
+nlp = [
+    "transformers>=4.40",
+    "sentence-transformers>=3.0",
+    "torch>=2.3",
+    "accelerate>=0.30",
+    "tokenizers>=0.19",
+]
+retrieval = [
+    "faiss-cpu>=1.8",
+    "langchain>=0.2",
+    "langchain-community>=0.2",
+    "langchain-openai>=0.1",
+    "networkx>=3.3",
+]
+graph = [
+    "torch>=2.3",
+    "torch-geometric>=2.5",
+    "networkx>=3.3",
+]
+graph-gpu = [
+    "torch>=2.3",
+    "torch-geometric>=2.5",
+    "networkx>=3.3",
+]
+notebooks = [
+    "jupyter>=1.0",
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "ipywidgets>=8.0",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# uv configuration
+# ──────────────────────────────────────────────────────────────────────────────
+
+[tool.uv]
+default-groups = []   # don't auto-install optional groups on plain `uv sync`
+
+[tool.uv.sources]
+# GPU torch: sourced from PyTorch's CUDA 12.1 index.
+# Active when syncing the graph-gpu group.
+torch = [
+    { index = "pytorch-cu121", marker = "extra == 'graph-gpu'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Ruff (linting / formatting)
+# ──────────────────────────────────────────────────────────────────────────────
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]   # pycodestyle errors, pyflakes, isort
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Build backend
+# ──────────────────────────────────────────────────────────────────────────────
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["Data", "Data_Process", "articles"]
