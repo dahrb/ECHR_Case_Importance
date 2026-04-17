@@ -45,3 +45,8 @@ articles/*/corpora/
 articles/*/*.pkl
 articles/*/importance_labels.csv
 .venv/
+
+# Large model / data files — exceed GitHub 100 MB limit
+*.safetensors
+old/Knowledge_Graph/wikipedia/
+old/BERT-rerank/model*/
