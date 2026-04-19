@@ -8,7 +8,7 @@ v1_0 = processes communicated case data for Article 3
 import pandas as pd
 import sys
 sys.path.insert(0,'/users/sgdbareh/volatile/ECHR_Importance')
-import data_preprocessing_COMM as dpc
+import Art_3_Data_Process.data_preprocessing_COMM as dpc
 import json
 
 #set directory
