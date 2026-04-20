@@ -24,9 +24,10 @@ import re
 from bs4 import BeautifulSoup, NavigableString, Tag
 from tqdm import tqdm
 
-if len(sys.argv) != 2:
-    raise ValueError("Usage: python s4_extract_text_v2_1.py <article_number>  e.g. 3, 6, 8")
+if len(sys.argv) < 2 or len(sys.argv) > 3:
+    raise ValueError("Usage: python s4_extract_text_v2_1.py <article_number> [--judgment-only]")
 ARTICLE = sys.argv[1]
+JUDGMENT_ONLY = len(sys.argv) == 3 and sys.argv[2] == '--judgment-only'
 
 
 """
@@ -170,9 +171,13 @@ def scrapecases(itemid_list, start_headers, end_headers, doc_type, passage_type)
     else:
         base_dir = os.path.join('corpora', f'article{ARTICLE}', doc_type, passage_type)
     
+    os.makedirs(base_dir, exist_ok=True)
     for case_item in tqdm(itemid_list): 
         # Extract case html text from HUDOC.
         identity = case_item[1]
+        # Skip if already scraped
+        if os.path.exists(os.path.join(base_dir, f"{identity}.txt")):
+            continue
         url = "https://hudoc.echr.coe.int/app/conversion/docx/html/body?library=ECHR&id=" + identity
         page = requests.get(url)
         case_html = BeautifulSoup(page.content, 'html.parser')       
@@ -180,7 +185,7 @@ def scrapecases(itemid_list, start_headers, end_headers, doc_type, passage_type)
         if passage_type == 'questions':      
             preprocess_html(case_html)
         case_passage = check_passage(case_html, identity, start_headers, end_headers)       
-        missing_list = write_case(base_dir, case_item[0], identity, case_passage, missing_list)
+        missing_list = write_case(base_dir, identity, case_passage, missing_list)
     
     # Write itemids corresponding to missing elements
     write_missing(f"{doc_type}_{passage_type}_missing", missing_list)    
@@ -189,7 +194,7 @@ def scrapecases(itemid_list, start_headers, end_headers, doc_type, passage_type)
 """
 def write_case saves the desired passage from the given case to the appropriate directory
 """
-def write_case(base_dir, doc_date, identity, passage_txt, missing_list):  
+def write_case(base_dir, identity, passage_txt, missing_list):  
     if passage_txt == "":
         missing_list.append(identity)
         return missing_list
@@ -197,7 +202,7 @@ def write_case(base_dir, doc_date, identity, passage_txt, missing_list):
     save_dir = base_dir
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    with open(os.path.join(save_dir, f"{doc_date}_{identity}.txt"), 'w', encoding='utf-8') as file:
+    with open(os.path.join(save_dir, f"{identity}.txt"), 'w', encoding='utf-8') as file:
         file.write(passage_txt)
     return missing_list
 
@@ -249,7 +254,8 @@ with open('missing_questions.txt', 'r') as file:
 itemid_list = missing_subject + missing_questions
 """
 
-main("COMMUNICATEDCASES")
+if not JUDGMENT_ONLY:
+    main("COMMUNICATEDCASES")
 
 main("ADMISSIBILITYCOM")
 main("ADMISSIBILITY")
