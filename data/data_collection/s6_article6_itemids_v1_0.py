@@ -59,7 +59,8 @@ get_itemids(itemid_dict, 'ADMISSIBILITY')
 get_itemids(itemid_dict, 'ADMISSIBILITYCOM')
 
 # Save the dictionary to a JSON file
-output_file = f'article{ARTICLE}_cases.json'
+os.makedirs("article_itemids", exist_ok=True)
+output_file = os.path.join("article_itemids", f"article{ARTICLE}_cases.json")
 with open(output_file, 'w', encoding='utf-8') as json_file:
     json.dump(itemid_dict, json_file, ensure_ascii=False, indent=4)
 print(f"Saved itemids for Article {ARTICLE} to {output_file}")

@@ -40,6 +40,8 @@ cmake-*.tar.gz
 Knowledge_Graph/subgraph*.html
 example.html
 
+docs
+
 # Article data directories — generated/downloaded content, not source
 articles/*/raw_metadata/
 articles/*/overlap_cases/

@@ -35,10 +35,29 @@ s5  Build keyword label dictionary from HUDOC taxonomy HTML
 s6  Extract article-specific itemids from raw_case_metadata
 s4  Scrape judgment text per article (--judgment-only skips comm phase)
         cwd: data/
-        output: data/corpora/article{N}/{BRANCH}/{subject_matter,questions}/
+        output: data/corpora/article{N}/{BRANCH}/{subject_matter,questions,fact_section,law_section}/
         repeat for each article: 3, 6, 8, ...
+
+CLI Usage
+---------
+Run full pipeline (all steps, all articles):
+    python data/data_collection.py
+
+Run only specific steps:
+    python data/data_collection.py --steps s4 s6
+
+Run only for specific articles (affects s6 + judgment s4 only):
+    python data/data_collection.py --articles 6 8
+
+Run judgment text scrape for Art 6 and 8 only:
+    python data/data_collection.py --steps s4_judgment --articles 6 8
+
+Available step names: s1, s2, s3, s4_comm, s5, s6, s4_judgment
+Shorthand aliases:    s4 → runs both s4_comm and s4_judgment
+                      all → runs everything (default)
 """
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -47,6 +66,9 @@ REPO = Path(__file__).parent.parent
 SCRIPTS = REPO / "data" / "data_collection"
 DATA = REPO / "data"
 
+ALL_STEPS = ["s1", "s2", "s3", "s4_comm", "s5", "s6", "s4_judgment"]
+DEFAULT_ARTICLES = ["3", "6", "8"]
+
 
 def run(script: str, *args, cwd: Path):
     cmd = [sys.executable, str(SCRIPTS / script), *args]
@@ -54,24 +76,72 @@ def run(script: str, *args, cwd: Path):
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
+def expand_steps(raw: list[str]) -> list[str]:
+    expanded = []
+    for s in raw:
+        if s == "all":
+            return ALL_STEPS
+        elif s == "s4":
+            expanded += ["s4_comm", "s4_judgment"]
+        else:
+            expanded.append(s)
+    # preserve ordering from ALL_STEPS
+    seen = set()
+    return [s for s in ALL_STEPS if s in expanded and not (seen.add(s) or s in seen)]
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ECHR data collection pipeline")
+    parser.add_argument(
+        "--steps",
+        nargs="+",
+        default=["all"],
+        metavar="STEP",
+        help=(
+            "Steps to run. Choices: s1 s2 s3 s4_comm s4_judgment s5 s6 "
+            "(aliases: s4=both s4 steps, all=full pipeline). Default: all"
+        ),
+    )
+    parser.add_argument(
+        "--articles",
+        nargs="+",
+        default=DEFAULT_ARTICLES,
+        metavar="N",
+        help="Articles to process for s6 and s4_judgment steps. Default: 3 6 8",
+    )
+    args = parser.parse_args()
+
+    steps = expand_steps(args.steps)
+    articles = args.articles
+
+    print(f"Steps:    {steps}")
+    print(f"Articles: {articles}")
+
+    if "s1" in steps:
+        (DATA / "raw_case_metadata").mkdir(parents=True, exist_ok=True)
+        run("s1_extract_meta_v1_1.py", cwd=DATA / "raw_case_metadata")
+
+    if "s2" in steps:
+        run("s2_overlap_cases_v1_0.py", cwd=DATA / "raw_case_metadata")
+
+    if "s3" in steps:
+        run("s3_get_labels_v1_1.py", cwd=DATA)
+
+    if "s4_comm" in steps:
+        # comm phase is article-agnostic; article arg is ignored inside the script
+        run("s4_extract_text_v2_1.py", "3", cwd=DATA)
+
+    # s5 — only re-run if the HUDOC taxonomy HTML has changed
+    if "s5" in steps:
+        run("s5_key_labels_dictionary_v1_0.py", cwd=DATA)
+
+    for article in articles:
+        if "s6" in steps:
+            (DATA / "article_itemids").mkdir(parents=True, exist_ok=True)
+            run("s6_article6_itemids_v1_0.py", article, cwd=DATA)
+        if "s4_judgment" in steps:
+            run("s4_extract_text_v2_1.py", article, "--judgment-only", cwd=DATA)
+
+
 if __name__ == "__main__":
-    # s1 — metadata
-    (DATA / "raw_case_metadata").mkdir(parents=True, exist_ok=True)
-    run("s1_extract_meta_v1_1.py", cwd=DATA / "raw_case_metadata")
-
-    # s2 — overlap
-    run("s2_overlap_cases_v1_0.py", cwd=DATA / "raw_case_metadata")
-
-    # s3 — labels
-    run("s3_get_labels_v1_1.py", cwd=DATA)
-
-    # s4 — comm-phase text (all articles; no article arg needed)
-    run("s4_extract_text_v2_1.py", "3", cwd=DATA)
-
-    # s5 — keyword dictionary (uncomment if taxonomy HTML has changed)
-    # run("s5_key_labels_dictionary_v1_0.py", cwd=DATA)
-
-    # s6 + s4 — judgment text per article
-    for article in ["3", "6", "8"]:
-        run("s6_article6_itemids_v1_0.py", article, cwd=DATA)
-        run("s4_extract_text_v2_1.py", article, "--judgment-only", cwd=DATA)
+    main()

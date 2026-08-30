@@ -75,7 +75,7 @@ def check_passage(case_html, identity, start_strings, end_strings):
 
 def extract_json_ids(chamber_type, file_path=None):
     if file_path is None:
-        file_path = f"article{ARTICLE}_cases.json"
+        file_path = os.path.join("article_itemids", f"article{ARTICLE}_cases.json")
 
     # Open and read the JSON file line by line
     with open(file_path, 'r', encoding='utf-8') as file:
@@ -209,9 +209,11 @@ def write_case(base_dir, identity, passage_txt, missing_list):
 
 def write_missing(missing_list_type, missing_list):
     if missing_list:
-        with open(missing_list_type + ".txt", 'w') as file:
+        os.makedirs(os.path.join("data_collection", "logs"), exist_ok=True)
+        path = os.path.join("data_collection", "logs", missing_list_type + ".txt")
+        with open(path, 'w') as file:
             for itemid in missing_list:
-                file.write(itemid + '\n') 
+                file.write(itemid + '\n')
     return
 
 
@@ -240,7 +242,7 @@ def main(doc_type):
         law_headers = ["THE LAW", "AS TO THE LAW", "LAW", "COMPLAINTS AND THE LAW", "HE LAW", "THE COURT’S ASSESSMENT", "FOR THESE REASONS, THE COURT, UNANIMOUSLY,"]
         terminal_headers = ["APPENDIX", "ANNEX"]
         # Running scrapecases to obtain relevant passages
-        #scrapecases(itemid_list, facts_headers, law_headers+terminal_headers, doc_type, "fact_section")
+        scrapecases(itemid_list, facts_headers, law_headers+terminal_headers, doc_type, "fact_section")
         scrapecases(itemid_list, law_headers, terminal_headers, doc_type, "law_section")
 
     return
