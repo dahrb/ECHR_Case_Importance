@@ -16,16 +16,25 @@ v1_1 OUT-OF-DATE DO NOT USE UPDATE FROM data_process_draft.ipynb
 #importance = importance
 #kpthesaurus = keywords
 
+import argparse
 import pandas as pd
 import os
 import sys
-sys.path.insert(0,'/users/sgdbareh/volatile/ECHR_Importance')
+
+ap = argparse.ArgumentParser()
+ap.add_argument('--data-dir', default='/users/sgdbareh/volatile/ECHR_Importance/Art_3_Data/corpora/article3')
+ap.add_argument('--metadata-dir', default='/users/sgdbareh/volatile/ECHR_Importance/raw_case_metadata')
+ap.add_argument('--keywords', default='350,89,90,596,620,618,192,193,633,492')
+ap.add_argument('--output', default=None)
+ap.add_argument('--new-format', action='store_true',
+                help='Filenames are {itemid}.txt (no date prefix); get date from metadata')
+args = ap.parse_args()
 
 #set directory
-data_directory = '/users/sgdbareh/volatile/ECHR_Importance/Art_3_Data/corpora/article3'
+data_directory = args.data_dir
 
-#article 3 keywords
-article3 = ['350','89','90','596','620','618','192','193','633','492']
+#article keywords
+article3 = args.keywords.split(',')
 
 #add filenames to a list then create lists of the facts and law section seperately
 list_files = []
@@ -74,22 +83,27 @@ df_merged = pd.merge(facts_df, law_df, on='Filename',how='inner')
 df_merged = df_merged[df_merged['Word Count'] >=60]
 
 #extract date and file name
-df_merged['date'] = df_merged['Filename'].str.split('_').str[0]
-df_merged['File'] = df_merged['Filename'].str.split('_').str[1]
+if args.new_format:
+    # {itemid}.txt filenames — date comes from metadata judgementdate/decisiondate
+    df_merged['File'] = df_merged['Filename']
+    df_merged['date'] = pd.NaT  # filled in from metadata after merge
+else:
+    df_merged['date'] = df_merged['Filename'].str.split('_').str[0]
+    df_merged['File'] = df_merged['Filename'].str.split('_').str[1]
+    #convert date to datetime
+    df_merged['date'] = pd.to_datetime(df_merged['date'], format='%Y-%m-%d')
 
-#convert date to datetime
-df_merged['date'] = pd.to_datetime(df_merged['date'], format='%Y-%m-%d')
-
-#filter out cases before 1995
-df_merged = df_merged[df_merged['date'] >= '1995-01-01']
+#filter out cases before 1995 (skipped for new-format; date not yet known until metadata merge)
+if not args.new_format:
+    df_merged = df_merged[df_merged['date'] >= '1995-01-01']
 
 #create columns for metadata .json
 metadata = pd.DataFrame(columns=['itemid','appno','doctypebranch','respondent','decisiondate','extractedappno','conclusion','importance','kpthesaurus','judgementdate','sclappnos'])
 
 #load metadata
-for file in os.listdir('/users/sgdbareh/volatile/ECHR_Importance/raw_case_metadata'):
+for file in os.listdir(args.metadata_dir):
     if file.endswith('.json'):
-        with open('/users/sgdbareh/volatile/ECHR_Importance/raw_case_metadata' + '/' + file) as f:
+        with open(args.metadata_dir + '/' + file) as f:
             data = pd.read_json(f,lines=True)
         metadata = pd.concat([metadata,data])
 
@@ -123,6 +137,10 @@ filtered_metadata = filtered_metadata[filtered_metadata['judgementdate'] >= '199
 #merge two dataframes - metadata and text data
 full_outcome_data = pd.merge(df_merged,filtered_metadata,on='File',how='inner')
 
+#new-format: date column comes from metadata (judgementdate still present pre-drop)
+if args.new_format:
+    full_outcome_data['date'] = full_outcome_data['judgementdate']
+
 #drop unneeded columns
 full_outcome_data.drop(['Filename','judgementdate'],axis=1,inplace=True)
 
@@ -133,7 +151,8 @@ full_outcome_data = full_outcome_data[full_outcome_data['kpthesaurus'] != '']
 full_outcome_data = full_outcome_data[full_outcome_data['kpthesaurus'].apply(lambda x: any(keyword in x for keyword in article3))]
 
 #save to .pkl
-full_outcome_data.to_pickle('/users/sgdbareh/volatile/ECHR_Importance/Art_3_Data_Process/outcome_cases.pkl')
+_default_out = os.path.join(data_directory, 'outcome_cases.pkl')
+full_outcome_data.to_pickle(args.output if args.output else _default_out)
 
 
 

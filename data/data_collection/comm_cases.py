@@ -5,14 +5,22 @@ Version history
 v1_0 = processes communicated case data for Article 3
 """
 
+import argparse
 import pandas as pd
 import sys
-sys.path.insert(0,'/users/sgdbareh/volatile/ECHR_Importance')
-import Art_3_Data_Process.data_preprocessing_COMM as dpc
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import preprocessing as dpc
 import json
 
+ap = argparse.ArgumentParser()
+ap.add_argument('--data-dir', default='/users/sgdbareh/volatile/ECHR_Importance/Art_3_Data/')
+ap.add_argument('--keywords', default='350,89,90,596,620,618,192,193,633,492')
+ap.add_argument('--output', default=None)
+args = ap.parse_args()
+
 #set directory
-data_directory = '/users/sgdbareh/volatile/ECHR_Importance/Art_3_Data/'
+data_directory = args.data_dir
 
 # Set the directory for the txt files
 questions = data_directory +'corpora/communication_phase/questions/'
@@ -25,13 +33,13 @@ df = dpc.data_2_df(questions, subject_matter)
 df = dpc.preprocessing(df)
 
 #link to importance labels and date
-df = dpc.link_outcome_labels(df,label_file='./important_labels.csv',data_directory=data_directory)
+df = dpc.link_outcome_labels(df,label_file='important_labels.csv',data_directory=data_directory)
 
-#article 3 keywords
-article3 = ['350','89','90','596','620','618','192','193','633','492']
+#article keywords
+article3 = args.keywords.split(',')
 
 # Load the .json file for the keyword labels
-with open('/users/sgdbareh/volatile/ECHR_Importance/Art_3_Data/key_labels.json') as f:
+with open(os.path.join(data_directory, 'key_labels.json')) as f:
     json_data = json.load(f)
 
 # Create a dictionary to map keyword labels to keywords
@@ -40,18 +48,18 @@ label_to_keyword = {label: keyword for label,keyword in json_data.items()}
 # Convert the key_words_keys column to a string
 df['key_words_keys'] = df['key_words_keys'].astype(str)
 
-# Create a new column to store the keywords in plain text 
+# Create a new column to store the keywords in plain text
+_keywords_col = []
 for i in range(len(df)):
-    keys = df['key_words_keys'][i].split(';')
+    keys = str(df['key_words_keys'].iloc[i]).split(';')
     keywords = []
     for key in keys:
         if key in label_to_keyword.keys():
             keywords.append(label_to_keyword[key])
-        else: 
+        else:
             pass
-    if 'keywords' not in df.columns:
-        df['keywords'] = ''
-    df.at[i, 'keywords'] = keywords
+    _keywords_col.append(keywords)
+df['keywords'] = _keywords_col
 
 # Filter out the rows with no keywords
 df_2 = df[df['keywords'].apply(lambda x: len(x) > 0)]
@@ -78,4 +86,5 @@ df_art_3['Subj_Count'] = df_art_3['Subject Matter'].str.split().str.len()
 df_art_3 = df_art_3[df_art_3['Subj_Count'] >= 50]
 
 #save comm cases
-df_art_3.to_pickle('/users/sgdbareh/volatile/ECHR_Importance/Art_3_Data_Process/comm_cases.pkl')
+_default_out = os.path.join(data_directory, 'comm_cases.pkl')
+df_art_3.to_pickle(args.output if args.output else _default_out)

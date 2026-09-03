@@ -26,20 +26,20 @@ legal-bert_raw_sentence_transformer_model/
 longformer_raw_sentence_transformer_model/
 Batches/
 Results/
-echr/
 Llama-3/llama-files
 Knowledge_Graph/archive models
 Knowledge_Graph/lib
 Knowledge_Graph/processed
 Knowledge_Graph/wikipedia
-*.pthmodels/
+*.pth
+models/
 models/
 *.gml
 *.gguf
 cmake-*.tar.gz
 Knowledge_Graph/subgraph*.html
 example.html
-
+data/data_collection/logs/
 docs
 
 # Article data directories — generated/downloaded content, not source
@@ -52,5 +52,17 @@ articles/*/importance_labels.csv
 
 # Large model / data files — exceed GitHub 100 MB limit
 *.safetensors
+*.faiss
+*.pt
+*.tar.gz
 old/Knowledge_Graph/wikipedia/
 old/BERT-rerank/model*/
+
+# Generated viz / heavy dev notebooks (not source)
+echr/graph/subgraph*.html
+echr/graph/wikipedia/
+
+# API keys
+old/VectorDB/API_key.py
+old/Summarize_Cases/API_key.py
+old/Llama-3/API_key.py

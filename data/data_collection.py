@@ -85,9 +85,14 @@ def expand_steps(raw: list[str]) -> list[str]:
             expanded += ["s4_comm", "s4_judgment"]
         else:
             expanded.append(s)
-    # preserve ordering from ALL_STEPS
+    # preserve ordering from ALL_STEPS, deduplicate
     seen = set()
-    return [s for s in ALL_STEPS if s in expanded and not (seen.add(s) or s in seen)]
+    result = []
+    for s in ALL_STEPS:
+        if s in expanded and s not in seen:
+            seen.add(s)
+            result.append(s)
+    return result
 
 
 def main():
