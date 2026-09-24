@@ -1,145 +1,128 @@
-import pandas as pd
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from datetime import datetime
-import logging
+import argparse
 import math
+import logging
+from datetime import datetime
+from pathlib import Path
 from torch.utils.data import DataLoader, Subset
-from sentence_transformers import LoggingHandler, util
-from sentence_transformers.cross_encoder import CrossEncoder
+from sentence_transformers import LoggingHandler
 from sentence_transformers.cross_encoder.evaluation import CEBinaryClassificationEvaluator
 from sentence_transformers.readers import InputExample
 import torch
-from sklearn.model_selection import KFold
-from sklearn.model_selection import train_test_split
-from utils import EarlyStopping, calculate_mcc, custom_collate_fn, CrossEncoderMod
-from torch.amp import GradScaler, autocast
-from optparse import OptionParser
+from sklearn.model_selection import GroupKFold, train_test_split
+import pandas as pd
+
+from utils import CrossEncoderMod, extract_scalar
 
 torch.cuda.empty_cache()
 
-#### Just some code to print debug information to stdout
 logging.basicConfig(
-    format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=logging.INFO, handlers=[LoggingHandler()]
+    format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO, handlers=[LoggingHandler()]
 )
 logger = logging.getLogger(__name__)
-#### /print debug information to stdout
 
-parser = OptionParser(usage='usage: -l learning_rate -b batch_size -d dropout')   
-parser.add_option("-d", "--dropout", action = "store", dest='dropout', type = "float", default = 0.0)
-parser.add_option("-l", "--learning_rate", action = "store", dest='learning_rate', type = "float", default = 1e-5)
-parser.add_option("-b", "--batch_size", action = "store", dest='batch_size', type = "int", default = 16)
-(options, _) = parser.parse_args()
+ROOT = Path(__file__).resolve().parents[2]
 
-dropout = options.dropout
-learning_rate = options.learning_rate
-batch_size = options.batch_size
+parser = argparse.ArgumentParser()
+parser.add_argument("--article", type=int, required=True, choices=[3, 6, 8])
+parser.add_argument("--dropout", "-d", type=float, default=0.0)
+parser.add_argument("--learning_rate", "-l", type=float, default=1e-5)
+parser.add_argument("--batch_size", "-b", type=int, default=16)
+parser.add_argument("--epochs", type=int, default=30)
+(args, _) = parser.parse_known_args()
 
 model_name = "nlpaueb/legal-bert-base-uncased"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+num_epochs = args.epochs
+article = args.article
 
-# Define our Cross-Encoder
-#train_batch_size = 1
-num_epochs = 30
-model_save_path = "/users/sgdbareh/volatile/ECHR_Importance/BERT-rerank/model" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-use_cuda = torch.cuda.is_available()
+vdb_dir = ROOT / "data" / "vectordb" / f"article{article}"
+model_save_path = str(vdb_dir / f"rerank_model_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
 
-train = pd.read_pickle('/users/sgdbareh/volatile/ECHR_Importance/BERT-rerank/BERT_training_data_df.pkl')
+train_df = pd.read_pickle(vdb_dir / "rerank_training_data.pkl")
 
 label2int = {"neg": 0, "pos": 1}
+all_samples = []
+sample_groups = []  # parallel list: Filename for each InputExample
+for _, row in train_df.iterrows():
+    fname = str(row["Filename"])
+    all_samples.append(InputExample(
+        texts=[str(row["Comm_Case"]).lower(), str(row["Positive"]).lower()],
+        label=label2int["pos"]
+    ))
+    sample_groups.append(fname)
+    all_samples.append(InputExample(
+        texts=[str(row["Comm_Case"]).lower(), str(row["Negative"]).lower()],
+        label=label2int["neg"]
+    ))
+    sample_groups.append(fname)
 
-train_samples = []
+# Case-level 80/20 holdout: split by unique Filename so no case straddles train/test
+unique_files = list(dict.fromkeys(sample_groups))
+cv_files, _ = train_test_split(unique_files, test_size=0.2, random_state=456)
+cv_file_set = set(cv_files)
+train_indices = [i for i, g in enumerate(sample_groups) if g in cv_file_set]
+train_samples = [all_samples[i] for i in train_indices]
+train_groups = [sample_groups[i] for i in train_indices]
 
-# Iterate over the DataFrame rows
-for index, row in train.iterrows():
-    # Create InputExample for positive label
-    train_samples.append(InputExample(texts=[str(row['Comm_Case']).lower(), str(row['Positive']).lower()], label=label2int["pos"]))
-    # Create InputExample for negative label
-    train_samples.append(InputExample(texts=[str(row['Comm_Case']).lower(), str(row['Negative']).lower()], label=label2int["neg"]))
+gkf = GroupKFold(n_splits=5)
 
-# Split the data into training and test sets
-train_samples, test_samples = train_test_split(train_samples, test_size=0.2, random_state=456)
-
-# 5-fold cross-validation
-kf = KFold(n_splits=5, shuffle=True, random_state=198)
-
-# Hyperparameter grid
 param_grid = {
-    'learning_rate': [learning_rate],
-    'batch_size': [batch_size],
-    'dropout': [dropout]
+    "learning_rate": [args.learning_rate],
+    "batch_size": [args.batch_size],
+    "dropout": [args.dropout],
 }
 
-# List to store results for each combination of hyperparameters
-results = []
-
-# Perform hyperparameter tuning
 best_ap_score = 0
 best_params = None
 
-for lr in param_grid['learning_rate']:
-    for bs in param_grid['batch_size']:
-        for dropout in param_grid['dropout']:
+for lr in param_grid["learning_rate"]:
+    for bs in param_grid["batch_size"]:
+        for dropout in param_grid["dropout"]:
             logger.info(f"Training with lr={lr}, batch_size={bs}, dropout={dropout}")
-
             fold_results = []
 
-            for fold, (train_index, val_index) in enumerate(kf.split(train_samples)):
-                 
-                logger.info(f"Training fold {fold + 1}")
+            for fold, (train_idx, val_idx) in enumerate(gkf.split(train_samples, groups=train_groups)):
+                logger.info(f"Fold {fold + 1}")
 
-                # Initialize the model with dropout
                 model = CrossEncoderMod(model_name, num_labels=1, classifier_dropout=dropout)
 
-                # Create subset dataloaders for the current fold
-                train_subset = Subset(train_samples, train_index)
-                val_subset = Subset(train_samples, val_index)
-    
-                train_dataloader = DataLoader(train_subset, shuffle=True, batch_size=bs)#,collate_fn=lambda x: model.smart_batching_collate(x))
-                #val_dataloader = DataLoader(val_subset, shuffle=False, batch_size=bs,collate_fn=custom_collate_fn)
+                train_subset = Subset(train_samples, train_idx)
+                val_subset = Subset(train_samples, val_idx)
+                train_dataloader = DataLoader(train_subset, shuffle=True, batch_size=bs)
 
-                # Configure the training
-                warmup_steps = math.ceil(len(train_dataloader) * num_epochs * 0.1)  # Warm-up steps
-                logger.info(f"Warmup-steps: {warmup_steps}")
-                
-                # Define evaluator for the validation set
-                evaluator = CEBinaryClassificationEvaluator.from_input_examples(val_subset, name='Relevance BERT')
+                warmup_steps = math.ceil(len(train_dataloader) * num_epochs * 0.1)
+                logger.info(f"Warmup steps: {warmup_steps}")
 
-                # Train the model
+                evaluator = CEBinaryClassificationEvaluator.from_input_examples(
+                    val_subset, name=f"Art{article}-Relevance"
+                )
+
+                fold_path = f"{model_save_path}_fold_{fold + 1}"
                 model.fit(
                     train_dataloader=train_dataloader,
                     evaluator=evaluator,
                     epochs=num_epochs,
                     evaluation_steps=0,
-                    optimizer_params={'lr': lr},
+                    optimizer_params={"lr": lr},
                     warmup_steps=warmup_steps,
-                    output_path=f"{model_save_path}_fold_{fold + 1}"
+                    output_path=fold_path,
                 )
 
-                # Evaluate the model on the validation set
-                evaluation_result = evaluator(model)
-                logger.info(f"Fold {fold + 1} evaluation result: {evaluation_result}")
-                
-                # Store the best model for the current fold
-                fold_results.append(evaluation_result)
+                score = extract_scalar(evaluator(model))
+                logger.info(f"Fold {fold + 1} AP: {score}")
+                fold_results.append(score)
 
-            # Calculate the average F1 score across all folds
-            avg_ap_score = sum(fold_results) / len(fold_results)
-            logger.info(f"Average AP score for lr={lr}, batch_size={bs}, dropout={dropout}: {avg_ap_score}")
+            avg_ap = sum(fold_results) / len(fold_results)
+            logger.info(f"Avg AP for lr={lr}, bs={bs}, dropout={dropout}: {avg_ap}")
 
-            # Update best hyperparameters if current combination is better
-            if avg_ap_score > best_ap_score:
-                best_ap_score = avg_ap_score
-                best_params = {
-                    'learning_rate': lr,
-                    'batch_size': bs,
-                    'dropout': dropout,
-                    'epochs':model.epoch
-                }
+            if avg_ap > best_ap_score:
+                best_ap_score = avg_ap
+                best_params = {"learning_rate": lr, "batch_size": bs, "dropout": dropout}
 
-logger.info(f"Hyperparameters: {best_params} and avg AP {best_ap_score}")
+logger.info(f"Best params: {best_params}, avg AP: {best_ap_score}")
 
-with open("results.txt", "a") as myfile:
-    myfile.write(f"Hyperparameters: {best_params} and avg AP {best_ap_score} \n")
+results_path = vdb_dir / "rerank_training_results.txt"
+with open(results_path, "a") as f:
+    f.write(f"{datetime.now()} | Article {article} | Params: {best_params} | Avg AP: {best_ap_score}\n")
 
-
-
+logger.info(f"Results written to {results_path}")

@@ -13,12 +13,13 @@ Output:
 import argparse
 import json
 import os
+import re
 import time
 
 import pandas as pd
 from openai import OpenAI
 
-from echr.prediction.prompts import base_zero_shot_prompt, court_prompt, COURT_MAP
+from echr.prediction.prompts import base_zero_shot_prompt, court_prompt, COURT_MAP, COURT_SOURCE_MAP
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA = os.path.join(REPO, "data")
@@ -32,35 +33,66 @@ def get_client(endpoint: str) -> OpenAI:
 
 
 def predict_one(client: OpenAI, row, article: str, model: str, condition: str = "base",
-                text: int = 1, cot: bool = False,
+                text: int = 1, cot: bool = False, max_tokens: int = 1200,
+                max_model_len: int = 32000,
+                reasoning_effort: str = None,
+                no_thinking: bool = False,
                 max_retries: int = 3, retry_delay: float = 5.0) -> dict:
+    # Budget: model context - output tokens - prompt template overhead (~500 tok)
+    # Use 3 chars/token (conservative for legal text) + 10% safety margin
+    max_chars = max(5000, int((max_model_len - max_tokens - 500) * 0.90) * 3 - 1500)
     if condition == "court":
-        prompt = court_prompt(row, article, text=text)
+        prompt = court_prompt(row, article, text=text, max_chars=max_chars)
     else:
-        prompt = base_zero_shot_prompt(row, article, text=text, cot=cot)
+        prompt = base_zero_shot_prompt(row, article, text=text, cot=cot, max_chars=max_chars)
 
+    extra = {}
+    if reasoning_effort:
+        extra["reasoning_effort"] = reasoning_effort
+    # For LoRA adapter models: disable thinking entirely — RE=medium is not enforced by
+    # vLLM through --enable-lora, so the model exhausts its budget on thinking tokens.
+    if no_thinking:
+        extra.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
     for attempt in range(max_retries):
         try:
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1200,
+                max_tokens=max_tokens,
                 temperature=0.0,
                 seed=42,
+                extra_body=extra,
             )
             content = resp.choices[0].message.content
             if content is None:
                 raise ValueError("API returned None content")
             raw = content.strip()
-            if raw.startswith("```"):
+            # Extract JSON: handle code fences anywhere in response
+            m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+            if m:
+                raw = m.group(1)
+            elif raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
+            elif not raw.startswith("{"):
+                start = raw.find("{")
+                if start != -1:
+                    raw = raw[start:]
+                    end = raw.rfind("```")
+                    if end != -1:
+                        raw = raw[:end]
             parsed = json.loads(raw)
 
             if condition == "court":
                 pred_raw = str(parsed.get("Court", "")).strip().lower()
+                # Try exact match first, then prefix match for "grand chamber" variants
                 pred = COURT_MAP.get(pred_raw, None)
+                if pred is None:
+                    for key, val in COURT_MAP.items():
+                        if pred_raw.startswith(key) or key in pred_raw:
+                            pred = val
+                            break
             else:
                 pred_raw = str(parsed.get("Case Importance", "")).strip().lower()
                 pred = IMPORTANCE_MAP.get(pred_raw, None)
@@ -98,7 +130,7 @@ def main():
                         help="Text field: 1=Subject Matter, 2=Questions, 3=Both")
     parser.add_argument("--endpoint", default=None,
                         help="vLLM base URL (default: read from data/vllm_endpoint.txt)")
-    parser.add_argument("--split", default="test", choices=["test", "valid"],
+    parser.add_argument("--split", default="test", choices=["test", "valid", "train"],
                         help="Which split to run on")
     parser.add_argument("--cot", action="store_true",
                         help="Chain-of-thought: add step-by-step reasoning instruction")
@@ -106,6 +138,15 @@ def main():
                         help="Skip already-predicted cases in output file")
     parser.add_argument("--limit", type=int, default=None,
                         help="Only process first N cases (for testing)")
+    parser.add_argument("--max_tokens", type=int, default=1200,
+                        help="Generation budget (raise for reasoning models like gpt-oss FT)")
+    parser.add_argument("--max_model_len", type=int, default=32000,
+                        help="Server max_model_len; used to compute prompt budget")
+    parser.add_argument("--reasoning_effort", default=None,
+                        choices=["low", "medium", "high"],
+                        help="gpt-oss reasoning effort; use 'medium' for base model")
+    parser.add_argument("--no_thinking", action="store_true",
+                        help="Disable thinking entirely (for LoRA FT models where RE=medium is not enforced)")
     args = parser.parse_args()
 
     if args.endpoint:
@@ -122,7 +163,7 @@ def main():
           f"condition={args.condition} split={args.split}")
     client = get_client(endpoint)
 
-    split_file = "comm_test.pkl" if args.split == "test" else "comm_valid.pkl"
+    split_file = {"test": "comm_test.pkl", "valid": "comm_valid.pkl", "train": "comm_train.pkl"}[args.split]
     cases_path = os.path.join(
         DATA, "processed", f"article{args.article}", "splits", split_file
     )
@@ -136,15 +177,21 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, out_name)
 
+    _MODEL_ALIASES = {"Llama-3.3-70B": "Llama-3.3-70B-Instruct-FP8", "Llama-3.3-70B-Instruct-FP8": "Llama-3.3-70B"}
     done_filenames = set()
-    if args.resume and os.path.exists(out_path):
-        with open(out_path) as f:
-            for line in f:
-                try:
-                    done_filenames.add(json.loads(line)["Filename"])
-                except Exception:
-                    pass
-        print(f"  Resuming: {len(done_filenames)} already done")
+    if args.resume:
+        _alias = _MODEL_ALIASES.get(safe_model)
+        _paths = [out_path] + ([os.path.join(out_dir, out_name.replace(safe_model, _alias))] if _alias else [])
+        for _p in _paths:
+            if os.path.exists(_p):
+                with open(_p) as f:
+                    for line in f:
+                        try:
+                            done_filenames.add(json.loads(line)["Filename"])
+                        except Exception:
+                            pass
+        if done_filenames:
+            print(f"  Resuming: {len(done_filenames)} already done")
 
     if args.limit:
         cases = cases.head(args.limit)
@@ -159,7 +206,11 @@ def main():
                 print(f"  [{i}/{len(cases)}] {filename}")
 
             result = predict_one(client, row, args.article, args.model,
-                                  condition=args.condition, text=args.text, cot=args.cot)
+                                  condition=args.condition, text=args.text, cot=args.cot,
+                                  max_tokens=args.max_tokens,
+                                  max_model_len=args.max_model_len,
+                                  reasoning_effort=args.reasoning_effort,
+                                  no_thinking=args.no_thinking)
             record = {
                 "Filename": filename,
                 "importance": int(row["importance"]) if pd.notna(row.get("importance")) else None,

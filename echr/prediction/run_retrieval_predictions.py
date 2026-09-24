@@ -19,12 +19,26 @@ import argparse
 import json
 import os
 import re
+import sys
 import time
 
 import pandas as pd
 from openai import OpenAI
 
 from echr.prediction.prompts import retrieval_prompt
+
+# Optional re-ranker — only imported when --rerank is set
+_reranker = None
+
+
+def load_reranker(model_path: str):
+    global _reranker
+    if _reranker is None:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "rerank"))
+        from sentence_transformers.cross_encoder import CrossEncoder
+        _reranker = CrossEncoder(model_path)
+        print(f"[reranker] Loaded from {model_path}", flush=True)
+    return _reranker
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA = os.path.join(REPO, "data")
@@ -66,13 +80,16 @@ def get_examples(
     appno_index: dict,
     summaries: pd.DataFrame,
     k: int,
+    n_retrieve: int = None,
 ) -> dict:
     """
-    Map top retrieved appnos to {file_id: (importance, summary)} dict, up to k entries.
+    Map top retrieved appnos to {file_id: (importance, summary)} dict.
+    Returns up to n_retrieve entries (use k when not reranking).
     """
+    limit = n_retrieve if n_retrieve is not None else k
     examples = {}
     for appno_raw in retrieved_appnos:
-        if len(examples) >= k:
+        if len(examples) >= limit:
             break
         first = appno_raw.split(";")[0].strip()
         rows = appno_index.get(first, [])
@@ -92,6 +109,22 @@ def get_examples(
     return examples
 
 
+def rerank_examples(
+    query_text: str,
+    examples: dict,
+    k: int,
+    reranker,
+) -> dict:
+    """Re-rank candidate examples by CrossEncoder score, return top-k."""
+    if len(examples) <= k:
+        return examples
+    file_ids = list(examples.keys())
+    pairs = [(query_text.lower(), examples[fid][1].lower()) for fid in file_ids]
+    scores = reranker.predict(pairs)
+    ranked = sorted(zip(scores, file_ids), reverse=True)
+    return {fid: examples[fid] for _, fid in ranked[:k]}
+
+
 def predict_one(
     client: OpenAI,
     row,
@@ -99,28 +132,53 @@ def predict_one(
     model: str,
     examples: dict,
     text: int = 1,
+    max_tokens: int = 1200,
+    max_model_len: int = 32000,
+    reasoning_effort: str = None,
+    no_thinking: bool = False,
     max_retries: int = 3,
     retry_delay: float = 5.0,
 ) -> dict:
-    prompt = retrieval_prompt(row, article, examples, text=text)
+    # Budget: model context - output tokens - prompt template overhead (~500 tok) - summary chars
+    # Use 3 chars/token (conservative for legal text); ensure at least 5000 chars
+    summaries_chars = sum(len(str(s)) for _, s in examples.values()) if examples else 0
+    available_tokens = int((max_model_len - max_tokens - 500) * 0.90)  # 10% safety margin
+    max_chars = max(5000, available_tokens * 3 - summaries_chars - 1500)
+    prompt = retrieval_prompt(row, article, examples, text=text, max_chars=max_chars)
+    extra = {}
+    if reasoning_effort:
+        extra["reasoning_effort"] = reasoning_effort
+    if no_thinking:
+        extra.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
     for attempt in range(max_retries):
         try:
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1200,
+                max_tokens=max_tokens,
                 temperature=0.0,
+                extra_body=extra,
                 seed=42,
             )
-            raw = resp.choices[0].message.content.strip()
-            if raw.startswith("```"):
+            content = resp.choices[0].message.content
+            if content is None:
+                raise ValueError("API returned None content")
+            raw = content.strip()
+            # Extract JSON: handle code fences anywhere in response
+            m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+            if m:
+                raw = m.group(1)
+            elif raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
-            if not raw.startswith("{"):
-                match = re.search(r"\{", raw)
-                if match:
-                    raw = raw[match.start():]
+            elif not raw.startswith("{"):
+                start = raw.find("{")
+                if start != -1:
+                    raw = raw[start:]
+                    end = raw.rfind("```")
+                    if end != -1:
+                        raw = raw[:end]
             parsed = json.loads(raw)
             pred_raw = str(parsed.get("Case Importance", "")).strip().lower()
             pred = IMPORTANCE_MAP.get(pred_raw, None)
@@ -163,7 +221,24 @@ def main():
     parser.add_argument("--split", default="test", choices=["test", "valid"])
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--rerank", action="store_true",
+                        help="Apply LegalBERT cross-encoder reranking before selecting top-k")
+    parser.add_argument("--rerank_model", default=None,
+                        help="Path to saved CrossEncoder model dir (required if --rerank)")
+    parser.add_argument("--no_thinking", action="store_true",
+                        help="Disable thinking for LoRA FT models (RE=medium not enforced through --enable-lora)")
+    parser.add_argument("--reasoning_effort", default=None, choices=["low","medium","high"],
+                        help="gpt-oss reasoning effort; use low for FT model")
+    parser.add_argument("--max_tokens", type=int, default=1200,
+                        help="Generation budget (raise for reasoning models like gpt-oss FT)")
+    parser.add_argument("--max_model_len", type=int, default=32000,
+                        help="Server max_model_len; used to compute prompt budget")
+    parser.add_argument("--rerank_pool", type=int, default=50,
+                        help="Candidate pool size before reranking (default 50)")
     args = parser.parse_args()
+
+    if args.rerank and not args.rerank_model:
+        raise ValueError("--rerank requires --rerank_model <path>")
 
     if args.endpoint:
         endpoint = args.endpoint
@@ -172,9 +247,11 @@ def main():
     else:
         raise RuntimeError(f"No endpoint and {ENDPOINT_FILE} not found.")
 
+    reranker = load_reranker(args.rerank_model) if args.rerank else None
+
     print(
         f"[art {args.article}] vLLM={endpoint} model={args.model} "
-        f"retriever={args.retriever} k={args.k} split={args.split}",
+        f"retriever={args.retriever} k={args.k} rerank={args.rerank} split={args.split}",
         flush=True,
     )
     client = get_client(endpoint)
@@ -201,22 +278,29 @@ def main():
     )
 
     safe_model = args.model.replace("/", "_").replace(":", "_")
+    rr_suffix = "_rerank" if args.rerank else ""
     out_name = (
-        f"retrieval_{args.retriever}_k{args.k}_text{args.text}_{args.split}_{safe_model}.jsonl"
+        f"retrieval_{args.retriever}_k{args.k}{rr_suffix}_text{args.text}_{args.split}_{safe_model}.jsonl"
     )
     out_dir = os.path.join(DATA, "results", f"article{args.article}")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, out_name)
 
+    _MODEL_ALIASES = {"Llama-3.3-70B": "Llama-3.3-70B-Instruct-FP8", "Llama-3.3-70B-Instruct-FP8": "Llama-3.3-70B"}
     done_filenames: set = set()
-    if args.resume and os.path.exists(out_path):
-        with open(out_path) as f:
-            for line in f:
-                try:
-                    done_filenames.add(json.loads(line)["Filename"])
-                except Exception:
-                    pass
-        print(f"  Resuming: {len(done_filenames)} already done", flush=True)
+    if args.resume:
+        _alias = _MODEL_ALIASES.get(safe_model)
+        _paths = [out_path] + ([os.path.join(out_dir, out_name.replace(safe_model, _alias))] if _alias else [])
+        for _p in _paths:
+            if os.path.exists(_p):
+                with open(_p) as f:
+                    for line in f:
+                        try:
+                            done_filenames.add(json.loads(line)["Filename"])
+                        except Exception:
+                            pass
+        if done_filenames:
+            print(f"  Resuming: {len(done_filenames)} already done", flush=True)
 
     if args.limit:
         cases = cases.head(args.limit)
@@ -231,9 +315,16 @@ def main():
                 print(f"  [{i}/{len(cases)}] {filename}", flush=True)
 
             retrieved = retrieval_results.get(filename, [])
-            examples = get_examples(retrieved, appno_index, summaries, args.k)
+            n_retrieve = args.rerank_pool if reranker else None
+            examples = get_examples(retrieved, appno_index, summaries, args.k, n_retrieve)
+            if reranker and examples:
+                query_text = str(row.get("Subject Matter", ""))
+                examples = rerank_examples(query_text, examples, args.k, reranker)
 
-            result = predict_one(client, row, args.article, args.model, examples, text=args.text)
+            result = predict_one(client, row, args.article, args.model, examples, text=args.text,
+                                 max_tokens=args.max_tokens, max_model_len=args.max_model_len,
+                                 reasoning_effort=args.reasoning_effort,
+                                 no_thinking=args.no_thinking)
             record = {
                 "Filename": filename,
                 "importance": int(row["importance"]) if pd.notna(row.get("importance")) else None,

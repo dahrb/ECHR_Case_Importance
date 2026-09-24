@@ -221,7 +221,8 @@ class CrossEncoderMod(CrossEncoder):
     def _eval_during_training(self, evaluator, output_path, save_best_model, epoch, steps, callback) -> None:
         """Runs evaluation during the training"""
         if evaluator is not None:
-            score = evaluator(self, output_path=output_path, epoch=epoch, steps=steps)
+            raw = evaluator(self, output_path=output_path, epoch=epoch, steps=steps)
+            score = extract_scalar(raw)
             if callback is not None:
                 callback(score, epoch, steps)
             if score > self.best_score:
@@ -229,7 +230,17 @@ class CrossEncoderMod(CrossEncoder):
                 if save_best_model:
                     self.save(output_path)
 
-            return score            
+            return score
+
+
+def extract_scalar(score) -> float:
+    """Extract a scalar AP from evaluator return value (dict in newer sentence-transformers)."""
+    if isinstance(score, dict):
+        for key in ("average_precision", "Average_Precision", "Average Precision", "ap", "f1", "accuracy"):
+            if key in score:
+                return float(score[key])
+        return float(max(score.values()))
+    return float(score)
 
 
 def calculate_mcc(y_true, y_pred):

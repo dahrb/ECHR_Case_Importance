@@ -86,15 +86,25 @@ def predict_one(
                 temperature=0.0,
                 seed=42,
             )
-            raw = resp.choices[0].message.content.strip()
-            if raw.startswith("```"):
+            _content = resp.choices[0].message.content
+            if _content is None:
+                raise ValueError("API returned None content")
+            raw = _content.strip()
+            # Extract JSON: handle code fences anywhere in response
+            m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+            if m:
+                raw = m.group(1)
+            elif raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
-            if not raw.startswith("{"):
-                match = re.search(r"\{", raw)
-                if match:
-                    raw = raw[match.start():]
+            elif not raw.startswith("{"):
+                start = raw.find("{")
+                if start != -1:
+                    raw = raw[start:]
+                    end = raw.rfind("```")
+                    if end != -1:
+                        raw = raw[:end]
             parsed = json.loads(raw)
             pred_raw = str(parsed.get("Case Importance", "")).strip().lower()
             pred = IMPORTANCE_MAP.get(pred_raw, None)
@@ -165,18 +175,24 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, out_name)
 
+    _MODEL_ALIASES = {"Llama-3.3-70B": "Llama-3.3-70B-Instruct-FP8", "Llama-3.3-70B-Instruct-FP8": "Llama-3.3-70B"}
     done_records: dict = {}  # Filename -> serialized line
-    if args.resume and os.path.exists(out_path):
-        with open(out_path) as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                    # Only count as done if prediction is non-null
-                    if rec.get("prediction") is not None:
-                        done_records[rec["Filename"]] = line
-                except Exception:
-                    pass
-        print(f"  Resuming: {len(done_records)} already done (with valid prediction)", flush=True)
+    if args.resume:
+        _alias = _MODEL_ALIASES.get(safe_model)
+        _paths = [out_path] + ([os.path.join(out_dir, out_name.replace(safe_model, _alias))] if _alias else [])
+        for _p in _paths:
+            if os.path.exists(_p):
+                with open(_p) as f:
+                    for line in f:
+                        try:
+                            rec = json.loads(line)
+                            # Only count as done if prediction is non-null; primary path takes precedence
+                            if rec.get("prediction") is not None and rec["Filename"] not in done_records:
+                                done_records[rec["Filename"]] = line
+                        except Exception:
+                            pass
+        if done_records:
+            print(f"  Resuming: {len(done_records)} already done (with valid prediction)", flush=True)
 
     if args.limit:
         cases = cases.head(args.limit)

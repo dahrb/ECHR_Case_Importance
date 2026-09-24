@@ -1,5 +1,6 @@
 *.zip
 *.sh
+!scripts/*.sh
 *.out
 *.csv
 *.txt
@@ -41,6 +42,10 @@ Knowledge_Graph/subgraph*.html
 example.html
 data/data_collection/logs/
 docs
+
+# Generated reranker checkpoints and experiment backups
+data/vectordb/**/rerank_model_*/
+data/results/**/*.bak*
 
 # Article data directories — generated/downloaded content, not source
 articles/*/raw_metadata/
