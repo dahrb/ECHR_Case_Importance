@@ -1,12 +1,11 @@
 #!/bin/bash -l
 # QLoRA Fine-tuning: openai/gpt-oss-120b
-# Parameterized by TAG (art3 | art6 | art8 | combined).
+# Parameterized by TAG (art3 | art6 | art8). Combined is intentionally excluded.
 # Run AFTER the Llama adapters (user requested Llama first).
 # Requires: data/finetune/$TAG/sft_train.jsonl + sft_val.jsonl to exist.
 #
 # Usage:
 #   sbatch --export=TAG=art3 scripts/finetune_gptoss.sh
-#   sbatch --export=TAG=combined scripts/finetune_gptoss.sh
 #
 # Default partition: gpu-a100-lowbig.
 #
@@ -23,10 +22,8 @@
 
 set -euo pipefail
 
-TAG="${TAG:-combined}"
-# Set HARMONY_SFT=1 to use reasoning-trace data (traces_train/val.jsonl) and
-# the harmony-channel SFT mode (analysis + final channels in training sequences).
-HARMONY_SFT="${HARMONY_SFT:-0}"
+TAG="${TAG:-}"
+case "$TAG" in art3|art6|art8) ;; *) echo "ERROR: TAG must be art3, art6, or art8" >&2; exit 2 ;; esac
 
 module purge
 module load cuda/12.8.0-gcc14.2.0
@@ -42,18 +39,10 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 cd "$REPO_DIR"
 
-DATA_DIR="data/finetune/$TAG"
-if [ "$HARMONY_SFT" = "1" ]; then
-    TRAIN_FILE="$DATA_DIR/traces_train.jsonl"
-    VAL_FILE="$DATA_DIR/traces_val.jsonl"
-    HARMONY_FLAG="--harmony_sft"
-    echo "Mode: HARMONY SFT (reasoning traces + analysis+final channels)"
-else
-    TRAIN_FILE="$DATA_DIR/sft_train.jsonl"
-    VAL_FILE="$DATA_DIR/sft_val.jsonl"
-    HARMONY_FLAG=""
-    echo "Mode: standard SFT"
-fi
+DATA_DIR="data/finetune_v2/$TAG"
+TRAIN_FILE="$DATA_DIR/sft_train.jsonl"
+VAL_FILE="$DATA_DIR/sft_val.jsonl"
+echo "Mode: completion-only SFT; GPT-OSS inference reasoning effort: medium"
 for f in "$TRAIN_FILE" "$VAL_FILE"; do
     if [ ! -f "$REPO_DIR/$f" ]; then
         echo "ERROR: $f not found." >&2
@@ -63,7 +52,11 @@ done
 echo "Train: $(wc -l < "$REPO_DIR/$TRAIN_FILE") examples"
 echo "Val:   $(wc -l < "$REPO_DIR/$VAL_FILE") examples"
 
-ADAPTER_DIR="$REPO_DIR/data/models/gptoss_lora_$TAG"
+ADAPTER_DIR="$REPO_DIR/data/models_v2/gptoss_lora_${TAG}_2ep"
+if [ -e "$ADAPTER_DIR" ]; then
+    echo "ERROR: fresh-run output already exists: $ADAPTER_DIR" >&2
+    exit 3
+fi
 mkdir -p "$ADAPTER_DIR" data/data_collection/logs
 
 export HF_HOME="$WORK_DIR/LLM_Models/models"
@@ -98,16 +91,13 @@ python echr/finetune/finetune_echr.py \
     --train_dataset "$REPO_DIR/$TRAIN_FILE" \
     --val_dataset   "$REPO_DIR/$VAL_FILE" \
     --output_dir    "$ADAPTER_DIR" \
-    --epochs 3 \
+    --epochs 2 \
     --batch_size 1 \
     --grad_accum 8 \
     --lora_r 16 \
     --lora_alpha 32 \
     --max_seq_len "${MAX_SEQ_LEN:-4096}" \
-    --no_eval \
-    --save_steps 25 \
-    --resume_from_checkpoint \
-    ${HARMONY_FLAG}
+    --reasoning_effort medium
 
 echo ""
 echo "Done: $(date). Adapter → $ADAPTER_DIR/adapter_final"

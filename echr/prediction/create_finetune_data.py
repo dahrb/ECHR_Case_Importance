@@ -1,241 +1,241 @@
+"""Build leakage-free, per-article SFT datasets from the canonical splits.
+
+The original notebook's alignment rule is retained: use reasoning only when it
+supports the gold label. ``comm_train.pkl`` is used for training,
+``comm_valid.pkl`` for validation, and ``comm_test.pkl`` remains untouched. If
+the stored validation file overlaps train or test (currently true for Article
+3), a deterministic, class-aware holdout is made from the current training
+pool instead. No combined dataset and no new reasoning traces are produced.
 """
-Assemble SFT fine-tuning data for ECHR importance prediction.
 
-Pipeline (mirrors old/finetune_data_creation.ipynb, generalised to Art3/6/8):
-
-  1. Load comm_train.pkl for each article → gold labels
-  2. Load base zero-shot predictions  (run_predictions.py --split train)
-  3. Load iterative predictions        (run_iterative_predictions.py --split train)
-  4. Find mismatch cases: both base AND iterative disagree with gold
-  5. Teacher-force mismatch cases via GPT-OSS: inject gold label, ask for reasoning
-  6. Assemble SFT JSONL (ChatML format): user=base prompt, assistant=gold label + best reasoning
-  7. Combine all articles, shuffle, 80/20 train/val split
-
-Output:
-    data/finetune/sft_all_articles.jsonl   — full assembled dataset
-    data/finetune/sft_train.jsonl          — 80 % split (used for QLoRA)
-    data/finetune/sft_val.jsonl            — 20 % split (eval during training)
-
-Usage:
-    python echr/prediction/create_finetune_data.py \\
-        --articles 3,6,8 \\
-        --model gpt-oss-120b \\
-        --endpoint http://gpu32.barkla2.liv.alces.network:8001/v1
-"""
+from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
-import time
+from collections import Counter
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
-from openai import OpenAI
 
-from echr.prediction.prompts import base_zero_shot_prompt, IMPORTANCE_LABEL_TO_KEY
+from echr.prediction.prompts import IMPORTANCE_LABEL_TO_KEY, base_zero_shot_prompt
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DATA = os.path.join(REPO, "data")
-ENDPOINT_FILE = os.path.join(DATA, "vllm_gptoss_endpoint.txt")
-
-IMPORTANCE_MAP = {"key_case": 1, "1": 2, "2": 3, "3": 4}
+ROOT = Path(__file__).resolve().parents[2]
+DATA = ROOT / "data"
 
 
-def load_base_predictions(article: str, model_safe: str) -> dict:
-    """Returns {filename: {"prediction": int, "reasoning": str}}"""
-    path = os.path.join(DATA, "results", f"article{article}",
-                        f"base_text1_train_{model_safe}.jsonl")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Base predictions not found: {path}")
-    out = {}
-    with open(path) as f:
-        for line in f:
-            rec = json.loads(line)
-            out[rec["Filename"]] = {
-                "prediction": rec.get("prediction"),
-                "reasoning": rec.get("reasoning", ""),
-            }
-    return out
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    with path.open() as handle:
+        return [json.loads(line) for line in handle if line.strip()]
 
 
-def load_iterative_predictions(article: str, model_safe: str) -> dict:
-    """Returns {filename: {"prediction": int, "reasoning": str}}"""
-    path = os.path.join(DATA, "results", f"article{article}",
-                        f"iterative_text1_train_{model_safe}.jsonl")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Iterative predictions not found: {path}")
-    out = {}
-    with open(path) as f:
-        for line in f:
-            rec = json.loads(line)
-            best_level = rec.get("predicted_level", "")
-            # Extract reasoning for the winning level
-            level_results = rec.get("level_results", {})
-            reasoning = level_results.get(best_level, {}).get("reasoning", "")
-            out[rec["Filename"]] = {
-                "prediction": rec.get("prediction"),
-                "reasoning": reasoning,
-            }
-    return out
+def load_predictions(article: str, split: str, kind: str) -> dict[str, dict[str, Any]]:
+    result_dir = DATA / "results" / f"article{article}"
+    if kind == "base":
+        path = result_dir / f"base_text1_{split}_gpt-oss-120b.jsonl"
+    elif kind == "iterative":
+        path = result_dir / f"iterative_text1_{split}_gpt-oss-120b.jsonl"
+    else:
+        raise ValueError(kind)
+
+    output: dict[str, dict[str, Any]] = {}
+    for record in read_jsonl(path):
+        reasoning = record.get("reasoning", "") or ""
+        if kind == "iterative":
+            level = record.get("predicted_level", "")
+            reasoning = record.get("level_results", {}).get(level, {}).get("reasoning", "") or ""
+        output[str(record["Filename"])] = {
+            "prediction": record.get("prediction"),
+            "reasoning": str(reasoning).strip(),
+        }
+    return output
 
 
-def teacher_force_one(client: OpenAI, row, article: str, model: str,
-                       gold_int: int, max_retries: int = 3, retry_delay: float = 5.0) -> str:
-    """Ask the LLM to justify the gold label. Returns reasoning string."""
-    gold_key = IMPORTANCE_LABEL_TO_KEY[gold_int]
-    base = base_zero_shot_prompt(row, article, text=1)
-    prompt = (
-        base
-        + f"\n\nThe importance level of this case is: {gold_key}. "
-        f"Please only predict this importance level and provide reasons why "
-        f"the case is importance level {gold_key}."
-    )
-    for attempt in range(max_retries):
+def load_aligned_cache(article: str) -> dict[str, dict[str, Any]]:
+    """Load rationales produced by the old correct/base/teacher-force builder."""
+    path = DATA / "finetune" / f"art{article}" / "sft_all_articles.jsonl"
+    cache: dict[str, dict[str, Any]] = {}
+    for record in read_jsonl(path):
+        meta = record.get("_meta", {})
+        filename = str(meta.get("filename", ""))
+        if not filename:
+            continue
         try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=600,
-                temperature=0.0,
-                seed=42,
-                response_format={"type": "json_object"},
-            )
-            raw = resp.choices[0].message.content.strip()
-            parsed = json.loads(raw)
-            return str(parsed.get("Reasoning", raw))
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"  Retry {attempt+1}/{max_retries}: {e}", flush=True)
-                time.sleep(retry_delay)
-            else:
-                print(f"  Teacher-force FAILED: {e}", flush=True)
-                return ""
-    return ""
+            answer = json.loads(record["messages"][-1]["content"])
+            gold = int(meta["gold"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        cache[filename] = {
+            "gold": gold,
+            "reasoning": str(answer.get("Reasoning", "") or "").strip(),
+            "source": str(meta.get("source", "cached")),
+        }
+    return cache
 
 
-def build_article_sft(article: str, client: OpenAI, model: str) -> list[dict]:
-    """Build SFT records for one article. Returns list of ChatML message dicts."""
-    model_safe = model.replace("/", "_").replace(":", "_")
+def choose_reasoning(filename: str, gold: int, split: str,
+                     cache: dict[str, dict[str, Any]],
+                     iterative: dict[str, dict[str, Any]],
+                     base: dict[str, dict[str, Any]]) -> tuple[str, str]:
+    cached = cache.get(filename)
+    if split == "train" and cached and cached["gold"] == gold and cached["reasoning"]:
+        return cached["reasoning"], f"aligned_cache_{cached['source']}"
 
-    cases = pd.read_pickle(
-        os.path.join(DATA, "processed", f"article{article}", "splits", "comm_train.pkl")
-    )
-    print(f"\n[art{article}] {len(cases)} train cases", flush=True)
+    prediction = iterative.get(filename, {})
+    if prediction.get("prediction") == gold and prediction.get("reasoning"):
+        return str(prediction["reasoning"]), "iterative_correct"
 
-    base_preds = load_base_predictions(article, model_safe)
-    iter_preds = load_iterative_predictions(article, model_safe)
+    prediction = base.get(filename, {})
+    if prediction.get("prediction") == gold and prediction.get("reasoning"):
+        return str(prediction["reasoning"]), "base_correct"
 
+    # Never attach a rationale produced for a different label.
+    return "", "gold_label_only"
+
+
+def build_split(article: str, cases: pd.DataFrame, prediction_split: str,
+                output_split: str, cache: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    base = load_predictions(article, prediction_split, "base")
+    iterative = load_predictions(article, prediction_split, "iterative")
     records = []
-    mismatch_count = 0
-    source_counts = {"iter": 0, "base": 0, "mismatch": 0, "failed": 0}
-
     for _, row in cases.iterrows():
-        fname = row["Filename"]
+        filename = str(row["Filename"])
         gold = int(row["importance"])
-
-        bp = base_preds.get(fname, {})
-        ip = iter_preds.get(fname, {})
-        base_pred = bp.get("prediction")
-        iter_pred = ip.get("prediction")
-
-        # Priority: iterative if correct → base if correct → teacher-force mismatch
-        if iter_pred == gold:
-            reasoning = ip.get("reasoning", "")
-            source = "iter"
-        elif base_pred == gold:
-            reasoning = bp.get("reasoning", "")
-            source = "base"
-        else:
-            # Both wrong: teacher-force to get gold-label reasoning
-            mismatch_count += 1
-            print(f"  Mismatch {fname}: gold={gold} iter={iter_pred} base={base_pred} → teacher-forcing", flush=True)
-            reasoning = teacher_force_one(client, row, article, model, gold)
-            source = "mismatch" if reasoning else "failed"
-
-        source_counts[source] += 1
-        gold_key = IMPORTANCE_LABEL_TO_KEY[gold]
-        user_prompt = base_zero_shot_prompt(row, article, text=1)
-        assistant_content = json.dumps({"Case Importance": gold_key, "Reasoning": reasoning})
-
+        gold_label = IMPORTANCE_LABEL_TO_KEY[gold]
+        reasoning, source = choose_reasoning(
+            filename, gold, prediction_split, cache, iterative, base
+        )
+        answer = {"Case Importance": gold_label, "Reasoning": reasoning}
         records.append({
             "messages": [
-                {"role": "user", "content": user_prompt},
-                {"role": "assistant", "content": assistant_content},
+                {"role": "user", "content": base_zero_shot_prompt(row, article, text=1)},
+                {"role": "assistant", "content": json.dumps(answer, ensure_ascii=False)},
             ],
-            "_meta": {"article": article, "filename": fname, "gold": gold, "source": source},
+            "metadata": {
+                "article": int(article), "filename": filename, "gold": gold,
+                "gold_label": gold_label, "reasoning_source": source,
+                "split": output_split, "source_split": prediction_split,
+            },
         })
-
-    print(f"[art{article}] Sources: {source_counts} (mismatches: {mismatch_count})", flush=True)
     return records
 
 
-def main():
+def audit(article: str, train: list[dict[str, Any]], validation: list[dict[str, Any]],
+          test_ids: set[str], split_note: dict[str, Any]) -> dict[str, Any]:
+    train_ids = [record["metadata"]["filename"] for record in train]
+    valid_ids = [record["metadata"]["filename"] for record in validation]
+    if len(train_ids) != len(set(train_ids)) or len(valid_ids) != len(set(valid_ids)):
+        raise ValueError(f"Article {article}: duplicate filenames within a split")
+    overlap = sorted(set(train_ids) & set(valid_ids))
+    if overlap:
+        raise ValueError(f"Article {article}: train/validation leakage: {overlap[:10]}")
+    train_test_overlap = sorted(set(train_ids) & test_ids)
+    valid_test_overlap = sorted(set(valid_ids) & test_ids)
+    if train_test_overlap or valid_test_overlap:
+        raise ValueError(
+            f"Article {article}: test leakage: train={train_test_overlap[:10]}, "
+            f"validation={valid_test_overlap[:10]}"
+        )
+
+    report: dict[str, Any] = {
+        "article": int(article), "train_validation_overlap": 0,
+        "train_test_overlap": 0, "validation_test_overlap": 0,
+        "validation_split": split_note,
+    }
+    for name, records in (("train", train), ("validation", validation)):
+        labels = Counter(record["metadata"]["gold_label"] for record in records)
+        sources = Counter(record["metadata"]["reasoning_source"] for record in records)
+        empty = sum(not json.loads(record["messages"][-1]["content"])["Reasoning"]
+                    for record in records)
+        report[name] = {
+            "examples": len(records), "labels": dict(sorted(labels.items())),
+            "reasoning_sources": dict(sorted(sources.items())), "empty_reasoning": empty,
+        }
+    return report
+
+
+def prepare_splits(article: str, seed: int = 42,
+                   holdout_fraction: float = 0.2) -> tuple[pd.DataFrame, pd.DataFrame,
+                                                               set[str], dict[str, Any]]:
+    split_dir = DATA / "processed" / f"article{article}" / "splits"
+    train = pd.read_pickle(split_dir / "comm_train.pkl").copy()
+    validation = pd.read_pickle(split_dir / "comm_valid.pkl").copy()
+    test = pd.read_pickle(split_dir / "comm_test.pkl")
+    ids = lambda frame: set(frame["Filename"].astype(str))
+    train_valid = sorted(ids(train) & ids(validation))
+    valid_test = sorted(ids(validation) & ids(test))
+
+    if not train_valid and not valid_test:
+        note = {"method": "canonical_comm_valid", "seed": None,
+                "holdout_fraction": None, "rejected_overlap_ids": []}
+        return train, validation, ids(test), note
+
+    # The stale Article 3 validation file overlaps both current train and test.
+    # Make a reproducible holdout, independently within each class, so even the
+    # rare labels are represented whenever at least two examples exist.
+    rng = random.Random(seed)
+    validation_indices: list[Any] = []
+    for _, group in train.groupby("importance", sort=True):
+        candidates = list(group.index)
+        rng.shuffle(candidates)
+        count = 1 if len(candidates) > 1 else 0
+        count = max(count, round(len(candidates) * holdout_fraction))
+        count = min(count, len(candidates) - 1) if len(candidates) > 1 else 0
+        validation_indices.extend(candidates[:count])
+    validation_indices = sorted(validation_indices)
+    validation = train.loc[validation_indices].copy()
+    train = train.drop(index=validation_indices).copy()
+    note = {
+        "method": "class_aware_holdout_from_current_comm_train",
+        "seed": seed, "holdout_fraction": holdout_fraction,
+        "reason": "stored comm_valid overlaps current train and/or test",
+        "stored_train_validation_overlap": train_valid,
+        "stored_validation_test_overlap": valid_test,
+        "held_out_ids": sorted(ids(validation)),
+    }
+    return train, validation, ids(test), note
+
+
+def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    with path.open("w") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--articles", default="3,6,8",
-                        help="Comma-separated articles to include (default: 3,6,8)")
-    parser.add_argument("--model", default="gpt-oss-120b")
-    parser.add_argument("--endpoint", default=None)
-    parser.add_argument("--val_frac", type=float, default=0.2,
-                        help="Fraction of data for validation (default: 0.2)")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--tag", default=None,
-                        help="Output subdir under data/finetune/ (default: auto — "
-                             "'art3' for single article, 'combined' for multiple)")
+    parser.add_argument("--articles", default="3,6,8")
+    parser.add_argument("--output_root", default="data/finetune_v2")
     args = parser.parse_args()
+    articles = [x.strip() for x in args.articles.replace("-", ",").split(",") if x.strip()]
+    if any(article not in {"3", "6", "8"} for article in articles):
+        raise ValueError("Only Articles 3, 6 and 8 are supported")
 
-    if args.endpoint:
-        endpoint = args.endpoint
-    elif os.path.exists(ENDPOINT_FILE):
-        endpoint = open(ENDPOINT_FILE).read().strip()
-    else:
-        raise RuntimeError(f"No endpoint and {ENDPOINT_FILE} not found.")
-
-    client = OpenAI(api_key="EMPTY", base_url=endpoint)
-    articles = [a.strip() for a in args.articles.split(",")]
-
-    all_records = []
+    output_root = ROOT / args.output_root
+    output_root.mkdir(parents=True, exist_ok=True)
+    reports = []
     for article in articles:
-        all_records.extend(build_article_sft(article, client, args.model))
-
-    print(f"\nTotal SFT records: {len(all_records)}", flush=True)
-
-    # Shuffle and split
-    rng = random.Random(args.seed)
-    rng.shuffle(all_records)
-    n_val = max(1, int(len(all_records) * args.val_frac))
-    val_records = all_records[:n_val]
-    train_records = all_records[n_val:]
-
-    # Output subdir: single article → 'artN', multiple → 'combined' (or user --tag)
-    if args.tag:
-        tag = args.tag
-    elif len(articles) == 1:
-        tag = f"art{articles[0]}"
-    else:
-        tag = "combined"
-    out_dir = os.path.join(DATA, "finetune", tag)
-    os.makedirs(out_dir, exist_ok=True)
-    print(f"Output tag: '{tag}' → {out_dir}", flush=True)
-
-    def write_jsonl(path, records):
-        # Strip _meta before writing (not needed by trainer)
-        with open(path, "w") as f:
-            for rec in records:
-                out = {"messages": rec["messages"]}
-                f.write(json.dumps(out) + "\n")
-        print(f"  Written {len(records)} records → {path}", flush=True)
-
-    # Full dataset (with meta, for inspection)
-    full_path = os.path.join(out_dir, "sft_all_articles.jsonl")
-    with open(full_path, "w") as f:
-        for rec in all_records:
-            f.write(json.dumps(rec) + "\n")
-    print(f"\nFull dataset ({len(all_records)} records) → {full_path}", flush=True)
-
-    write_jsonl(os.path.join(out_dir, "sft_train.jsonl"), train_records)
-    write_jsonl(os.path.join(out_dir, "sft_val.jsonl"), val_records)
-
-    print(f"\nDone. Train={len(train_records)} Val={len(val_records)}", flush=True)
+        cache = load_aligned_cache(article)
+        train_cases, validation_cases, test_ids, split_note = prepare_splits(article)
+        train = build_split(article, train_cases, "train", "train", cache)
+        validation_prediction_split = (
+            "train" if split_note["method"].startswith("class_aware") else "valid"
+        )
+        validation = build_split(
+            article, validation_cases, validation_prediction_split, "validation", cache
+        )
+        report = audit(article, train, validation, test_ids, split_note)
+        reports.append(report)
+        destination = output_root / f"art{article}"
+        destination.mkdir(parents=True, exist_ok=True)
+        write_jsonl(destination / "sft_train.jsonl", train)
+        write_jsonl(destination / "sft_val.jsonl", validation)
+        (destination / "audit.json").write_text(json.dumps(report, indent=2) + "\n")
+        print(json.dumps(report, indent=2), flush=True)
+    (output_root / "audit_all.json").write_text(json.dumps(reports, indent=2) + "\n")
 
 
 if __name__ == "__main__":

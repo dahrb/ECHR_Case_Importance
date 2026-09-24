@@ -46,6 +46,7 @@ docs
 # Generated reranker checkpoints and experiment backups
 data/vectordb/**/rerank_model_*/
 data/results/**/*.bak*
+data/finetune_v2/
 
 # Article data directories — generated/downloaded content, not source
 articles/*/raw_metadata/

@@ -1,7 +1,6 @@
 #!/bin/bash
-# Build SFT fine-tuning JSONL from GPT-OSS train-split predictions.
-# Includes mismatch teacher-forcing (small number of LLM calls).
-# Depends on: run_gptoss_train_inference.sh jobs completing first.
+# Build audited SFT JSONL locally from canonical data and existing aligned
+# rationales. No inference endpoint and no SLURM dependency are required.
 #
 # Usage:
 #   sbatch scripts/create_finetune_data.sh             # all articles
@@ -19,10 +18,6 @@
 set -euo pipefail
 
 ARTICLES="${ARTICLES:-3,6,8}"
-MODEL="${MODEL:-gpt-oss-120b}"
-ENDPOINT="${ENDPOINT:-}"
-TAG="${TAG:-}"
-
 # SLURM --export treats commas as variable separators, so multi-article values
 # must be passed comma-free (e.g. ARTICLES=3-6-8 or "3 6 8"). Normalise to CSV here.
 ARTICLES=$(echo "$ARTICLES" | tr ' -' ',,' | tr -s ',')
@@ -31,28 +26,20 @@ REPO_DIR="/users/sgdbareh/scratch/ECHR_Importance"
 VENV="/mnt/data1/users/sgdbareh/venvs/ECHR_Importance"
 
 cd "$REPO_DIR"
-mkdir -p data/data_collection/logs data/finetune
+mkdir -p data/data_collection/logs data/finetune_v2
 
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "========================================"
 echo "  Building SFT data — Articles: $ARTICLES"
-echo "  Model: $MODEL"
 echo "  Started: $(date)"
 echo "========================================"
 
-# Use endpoint from file if not explicitly set
-if [ -z "$ENDPOINT" ]; then
-    ENDPOINT=$(cat data/vllm_gptoss_endpoint.txt)
-fi
-
 "$VENV/bin/python" echr/prediction/create_finetune_data.py \
     --articles "$ARTICLES" \
-    --model "$MODEL" \
-    --endpoint "$ENDPOINT" \
-    ${TAG:+--tag "$TAG"}
+    --output_root data/finetune_v2
 
 echo "========================================"
-echo "  SFT data written to data/finetune/"
+echo "  SFT data written to data/finetune_v2/"
 echo "  Done: $(date)"
 echo "========================================"

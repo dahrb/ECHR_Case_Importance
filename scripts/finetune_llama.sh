@@ -1,11 +1,9 @@
 #!/bin/bash -l
 # QLoRA Fine-tuning: meta-llama/Llama-3.3-70B-Instruct (bf16, gated — needs hf.key)
-# Parameterized by TAG (art3 | art6 | art8 | combined).
-# Requires: data/finetune/$TAG/sft_train.jsonl + sft_val.jsonl to exist.
+# Parameterized by TAG (art3 | art6 | art8). Combined is intentionally excluded.
 #
 # Usage:
 #   sbatch --export=TAG=art3 scripts/finetune_llama.sh          # Art3 adapter (first)
-#   sbatch --export=TAG=combined scripts/finetune_llama.sh      # combined adapter
 #   sbatch --export=TAG=art6,PARTITION=gpu-h100 scripts/finetune_llama.sh
 #
 # Default partition: gpu-a100-lowbig (4x A100 80GB nodes, leaves H100 for inference).
@@ -22,7 +20,8 @@
 
 set -euo pipefail
 
-TAG="${TAG:-combined}"
+TAG="${TAG:-}"
+case "$TAG" in art3|art6|art8) ;; *) echo "ERROR: TAG must be art3, art6, or art8" >&2; exit 2 ;; esac
 # Base model + adapter-dir suffix are overridable so we can retrain on FP8:
 #   sbatch --export=TAG=art3,MODEL_ID=nvidia/Llama-3.3-70B-Instruct-FP8,ADAPTER_SUFFIX=_fp8 scripts/finetune_llama.sh
 # FP8 base auto-selects --load_mode asis (LoRA on frozen FP8 base); bnb 4-bit cannot
@@ -44,17 +43,21 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 cd "$REPO_DIR"
 
-DATA_DIR="data/finetune/$TAG"
+DATA_DIR="data/finetune_v2/$TAG"
 for f in "$DATA_DIR/sft_train.jsonl" "$DATA_DIR/sft_val.jsonl"; do
     if [ ! -f "$REPO_DIR/$f" ]; then
-        echo "ERROR: $f not found. Run: sbatch --export=TAG=$TAG,... scripts/create_finetune_data.sh first." >&2
+        echo "ERROR: $f not found. Run scripts/create_finetune_data.sh first." >&2
         exit 1
     fi
 done
 echo "Train: $(wc -l < $DATA_DIR/sft_train.jsonl) examples"
 echo "Val:   $(wc -l < $DATA_DIR/sft_val.jsonl) examples"
 
-ADAPTER_DIR="$REPO_DIR/data/models/llama_lora_${TAG}${ADAPTER_SUFFIX}"
+ADAPTER_DIR="$REPO_DIR/data/models_v2/llama_lora_${TAG}_2ep${ADAPTER_SUFFIX}"
+if [ -e "$ADAPTER_DIR" ]; then
+    echo "ERROR: fresh-run output already exists: $ADAPTER_DIR" >&2
+    exit 3
+fi
 mkdir -p "$ADAPTER_DIR" data/data_collection/logs
 
 export HF_HOME="$WORK_DIR/LLM_Models/models"
@@ -90,14 +93,12 @@ python echr/finetune/finetune_echr.py \
     --train_dataset "$DATA_DIR/sft_train.jsonl" \
     --val_dataset   "$DATA_DIR/sft_val.jsonl" \
     --output_dir    "$ADAPTER_DIR" \
-    --epochs 3 \
+    --epochs 2 \
     --batch_size 1 \
     --grad_accum 8 \
     --lora_r 16 \
     --lora_alpha 32 \
-    --max_seq_len 2048 \
-    --save_steps 25 \
-    --resume_from_checkpoint
+    --max_seq_len "${MAX_SEQ_LEN:-4096}"
 
 echo ""
 echo "Done: $(date). Adapter → $ADAPTER_DIR/adapter_final"
