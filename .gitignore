@@ -72,3 +72,17 @@ echr/graph/wikipedia/
 old/VectorDB/API_key.py
 old/Summarize_Cases/API_key.py
 old/Llama-3/API_key.py
+
+# Figure image outputs (keep the generator .py, not the rendered .png)
+Figs/*.png
+Figs/results_atlas/
+
+# Paper / thesis drafts and binary docs (not source)
+*.pdf
+THESIS_RESULTS_REWRITE.md
+data/experiment_coverage.md
+
+# Data run artifacts (generated; some are hundreds of GB)
+data/archive/
+data/models_v2/
+data/results/
