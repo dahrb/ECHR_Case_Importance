@@ -69,7 +69,11 @@ IMPORTANCE_LABEL_TO_KEY = {1: "key_case", 2: "1", 3: "2", 4: "3"}
 
 def retrieval_prompt(row, article: str, examples: dict, text: int = 1,
                      max_chars: int = None) -> str:
-    """RAG prompt. examples = {file_id: (importance_int, summary_str), ...}"""
+    """RAG prompt. examples = {file_id: (importance_int, summary_str), ...}.
+
+    ``max_chars`` limits both the query text and each retrieved summary so the
+    caller can enforce an aggregate context budget for larger values of k.
+    """
     article_desc = ARTICLE_DESCRIPTIONS.get(str(article), f"Article {article} of the ECHR")
     match text:
         case 1:
@@ -90,7 +94,8 @@ def retrieval_prompt(row, article: str, examples: dict, text: int = 1,
     examples_str = ""
     for _fid, (imp, summary) in examples.items():
         imp_key = IMPORTANCE_LABEL_TO_KEY.get(int(imp), str(imp))
-        examples_str += f"Summary: {summary}\nImportance level for that case: {imp_key}.\n\n"
+        summary_text = str(summary)[:max_chars] if max_chars is not None else str(summary)
+        examples_str += f"Summary: {summary_text}\nImportance level for that case: {imp_key}.\n\n"
 
     additional_context = (
         "You are also given summaries of a number of relevant outcome cases and their importance "
@@ -255,7 +260,8 @@ ITER_LEVELS = {
 ITER_SCHEMA = '{"Level": "string (the importance level being assessed)", "Matches": "string (Yes or No)", "Confidence": "number (0.0–1.0, how confident you are in the Matches answer)", "Reasoning": "string"}'
 
 
-def iterative_prompt(row, article: str, level_key: str, text: int = 1) -> str:
+def iterative_prompt(row, article: str, level_key: str, text: int = 1,
+                     max_chars: int = None) -> str:
     """
     Per-level binary query for iterative prompting (Exp 2).
     Ask the model whether the case matches one specific importance level.
@@ -276,16 +282,77 @@ def iterative_prompt(row, article: str, level_key: str, text: int = 1) -> str:
         case _:
             raise ValueError(f"Invalid text value: {text}")
 
+    if max_chars is not None:
+        text_content = str(text_content)[:max_chars]
+
     return (
         f"You are a lawyer in the European Court of Human Rights. Your task is to assess whether a "
         f"communicated case matches a specific importance level.\n"
         f"All cases concern {article_desc}.\n"
         f"You will be given the {text_label} of a communicated case.\n"
+        f"The communicated case information: {text_content}.\n"
         f"The importance level to assess: {level_desc}.\n"
         f"Does this communicated case match this importance level? Answer Yes or No, and provide a "
         f"confidence score between 0.0 (not at all) and 1.0 (certain), along with brief reasoning.\n"
         f"The output must be in JSON format with this schema: {ITER_SCHEMA}.\n"
-        f"The communicated case information: {text_content}."
+    )
+
+
+def iterative_retrieval_prompt(row, article: str, level_key: str, examples: dict,
+                               text: int = 1, max_chars: int = None) -> str:
+    """Render one level-specific iterative prompt with the normal RAG context.
+
+    The retrieved examples and their gold importance labels are rendered exactly
+    as in :func:`retrieval_prompt`; only the decision instruction and response
+    schema differ.  This permits the iterative arm to use the same
+    article/retriever/k matrix as fine-tuned inference.
+    """
+    article_desc = ARTICLE_DESCRIPTIONS.get(str(article), f"Article {article} of the ECHR")
+    level_desc = ITER_LEVELS[level_key]
+    match text:
+        case 1:
+            text_content = row["Subject Matter"]
+            text_label = "subject matter of the case"
+        case 2:
+            text_content = row["Questions"]
+            text_label = "questions asked to the parties"
+        case 3:
+            text_content = str(row["Subject Matter"]) + " " + str(row["Questions"])
+            text_label = "subject matter of the case and the questions asked to the parties"
+        case _:
+            raise ValueError(f"Invalid text value: {text}")
+
+    if max_chars is not None:
+        text_content = str(text_content)[:max_chars]
+
+    examples_str = ""
+    for _fid, (importance, summary) in examples.items():
+        importance_key = IMPORTANCE_LABEL_TO_KEY.get(int(importance), str(importance))
+        summary_text = str(summary)[:max_chars] if max_chars is not None else str(summary)
+        examples_str += (
+            f"Summary: {summary_text}\n"
+            f"Importance level for that case: {importance_key}.\n\n"
+        )
+
+    additional_context = (
+        "You are also given summaries of relevant outcome cases and their importance "
+        f"levels; consider them carefully when making your decision.\n{examples_str}"
+        if examples_str else ""
+    )
+    return (
+        "You are a lawyer in the European Court of Human Rights. Your task is to assess "
+        "whether a communicated case matches a specific importance level.\n"
+        f"All cases concern {article_desc}.\n"
+        f"You will be given the {text_label} of a communicated case.\n"
+        f"{additional_context}"
+        # Keep all expensive retrieved context and case text before the one
+        # level-specific suffix.  The four iterative calls for a case can then
+        # share vLLM's automatic prefix cache without changing their content.
+        f"The communicated case information: {text_content}.\n"
+        f"The importance level to assess: {level_desc}.\n"
+        "Does this communicated case match this importance level? Answer Yes or No, and provide "
+        "a confidence score between 0.0 (not at all) and 1.0 (certain), along with brief reasoning.\n"
+        f"The output must be in JSON format with this schema: {ITER_SCHEMA}.\n"
     )
 
 

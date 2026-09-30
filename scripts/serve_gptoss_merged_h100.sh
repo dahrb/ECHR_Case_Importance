@@ -3,38 +3,45 @@
 # Parallel alternative to serve_gptoss_merged.sh (A100 version).
 # Writes to same endpoint file → prediction jobs use whichever starts first.
 #
-# MXFP4 format: TP=2 (native H100 support, no VLLM_MXFP4_DEQUANT)
-# bf16 format:  TP=4 (4×80GB H100 = 320GB, fits 240GB model)
+# MXFP4 fits a single 80GB H100 for the 24k iterative/FT prompt profile.
+# bf16 still requires four H100s.
 #
 # Usage:
-#   sbatch --export=ARTICLE=3 scripts/serve_gptoss_merged_h100.sh
+#   sbatch --export=ARTICLE=3,EPOCH=1 scripts/serve_gptoss_merged_h100.sh
 #
 #SBATCH --job-name=gptoss_merged_h100
-#SBATCH --output=data/data_collection/logs/gptoss_merged_h100_art%a_%j.out
-#SBATCH --error=data/data_collection/logs/gptoss_merged_h100_art%a_%j.err
+#SBATCH --output=data/data_collection/logs/gptoss_merged_h100_%j.out
+#SBATCH --error=data/data_collection/logs/gptoss_merged_h100_%j.err
 #SBATCH --partition=gpu-h100
-#SBATCH --time=12:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=300G
-#SBATCH --gres=gpu:4
+#SBATCH --gres=gpu:1
+#SBATCH --no-requeue
 
 set -euo pipefail
 
 : "${ARTICLE:?Must set ARTICLE (3, 6, or 8) via --export=ARTICLE=N}"
+: "${EPOCH:?Must set EPOCH (1 or 2) via --export=EPOCH=N}"
+case "$ARTICLE:$EPOCH" in
+    3:1|3:2|6:1|6:2|8:1|8:2) ;;
+    *) echo "ERROR: ARTICLE must be 3/6/8 and EPOCH must be 1/2" >&2; exit 2 ;;
+esac
 
 PORT="${PORT:-8014}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-48000}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-24000}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
 VENV_NAME=".venv_11_2"
 
 REPO_DIR="/users/sgdbareh/scratch/ECHR_Importance"
 ADM_DIR="/users/sgdbareh/scratch/ADM_JURIX"
 VENV="$ADM_DIR/$VENV_NAME"
 HF_HOME="$ADM_DIR/LLM_Models/models"
-MODEL_DIR="$REPO_DIR/data/models/gptoss_merged_art${ARTICLE}"
-ENDPOINT_FILE="$REPO_DIR/data/vllm_gptoss_merged_art${ARTICLE}_endpoint.txt"
-MNT_ENDPOINT_FILE="/mnt/scratch/users/sgdbareh/ECHR_Importance/data/vllm_gptoss_merged_art${ARTICLE}_endpoint.txt"
+MODEL_DIR="${MODEL_DIR:-$REPO_DIR/data/models_v2/gptoss_merged_art${ARTICLE}_e${EPOCH}}"
+ENDPOINT_FILE="${ENDPOINT_FILE:-$REPO_DIR/data/vllm_gptoss_merged_art${ARTICLE}_e${EPOCH}_endpoint.txt}"
+MNT_ENDPOINT_FILE="/mnt/scratch/users/sgdbareh/ECHR_Importance/data/$(basename "$ENDPOINT_FILE")"
 
 cd "$REPO_DIR"; mkdir -p data/data_collection/logs
 
@@ -54,21 +61,29 @@ HF_KEY="$ADM_DIR/LLM_Experiments/hf.key"
 
 FORMAT_FILE="$MODEL_DIR/FORMAT"
 if [ ! -f "$FORMAT_FILE" ]; then
-    echo "ERROR: $FORMAT_FILE not found — merge job must complete first." >&2
+    echo "Model not ready yet — polling $FORMAT_FILE (up to 8h)..."
+    for i in $(seq 1 2880); do
+        [ -f "$FORMAT_FILE" ] && { echo "  Model ready after ${i}x10s"; break; }
+        [ $((i % 60)) -eq 0 ] && echo "  Still waiting (${i}/2880, $((i/6))min elapsed)..."
+        sleep 10
+    done
+fi
+if [ ! -f "$FORMAT_FILE" ]; then
+    echo "ERROR: $FORMAT_FILE not found after 8h" >&2
     exit 1
 fi
 FORMAT=$(cat "$FORMAT_FILE")
 echo "Model format: $FORMAT"
 
 if [ "$FORMAT" = "mxfp4" ]; then
-    TP=2
+    TP="${TP:-1}"
     echo "Serving MXFP4 model natively on H100 with TP=$TP"
 else
-    TP=4
+    TP="${TP:-4}"
     echo "Serving bf16 model with TP=$TP"
 fi
 
-MODEL_NAME="gptoss-ft-art${ARTICLE}"
+MODEL_NAME="${MODEL_NAME:-gptoss-v2-art${ARTICLE}-e${EPOCH}}"
 NODE=$(hostname)
 ENDPOINT="http://${NODE}:${PORT}/v1"
 
@@ -76,7 +91,7 @@ rm -f "$ENDPOINT_FILE" "$MNT_ENDPOINT_FILE"
 echo "$ENDPOINT" > "$ENDPOINT_FILE"
 [ -d "$(dirname "$MNT_ENDPOINT_FILE")" ] && echo "$ENDPOINT" > "$MNT_ENDPOINT_FILE" || true
 
-echo "==== GPT-OSS merged art${ARTICLE} serve @ $ENDPOINT (H100, TP=$TP, format=$FORMAT) ===="; date
+echo "==== GPT-OSS v2 merged art${ARTICLE} epoch ${EPOCH} serve @ $ENDPOINT (H100, TP=$TP, format=$FORMAT) ===="; date
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 vllm serve "$MODEL_DIR" \
@@ -86,4 +101,4 @@ vllm serve "$MODEL_DIR" \
     --served-model-name "$MODEL_NAME" \
     --trust-remote-code \
     --max-model-len "$MAX_MODEL_LEN" \
-    --max-num-seqs 16
+    --max-num-seqs "$MAX_NUM_SEQS"

@@ -1,11 +1,13 @@
 #!/bin/bash -l
 # Re-quantize a merged GPT-OSS bf16 model to MXFP4 using nvidia-modelopt.
-# Loads the 218GB bf16 merged model (device_map=auto, 4×A100 80GB),
+# Run this on Hopper (not A100): native ModelOpt MXFP4 quantization requires it.
+# Loads the 218GB bf16 merged model (device_map=auto across 4×80GB GPUs),
 # runs MXFP4 calibration, exports with export_hf_checkpoint.
 # Skips if FORMAT sentinel already says "mxfp4".
 #
 # Usage:
-#   sbatch --export=ARTICLE=3 scripts/requantize_gptoss.sh
+#   sbatch --partition=gpu-h100 --export=ALL,ARTICLE=3,MODEL_DIR=/path/to/merged \
+#       scripts/requantize_gptoss.sh
 #
 #SBATCH --job-name=gptoss_requant
 #SBATCH --output=data/data_collection/logs/gptoss_requant_art%a_%j.out
@@ -44,9 +46,21 @@ HF_KEY="$ADM_DIR/LLM_Experiments/hf.key"
 [ -f "$HF_KEY" ] && { export HF_TOKEN="$(< "$HF_KEY")"; export HUGGINGFACE_HUB_TOKEN="$HF_TOKEN"; }
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
+# v2 merge outputs are named by the submitter.  Supplying MODEL_DIR makes the
+# requantization job consume that exact BF16 artifact rather than a legacy path.
+MODEL_DIR="${MODEL_DIR:-$REPO_DIR/data/models_v2/gptoss_merged_art${ARTICLE}_current}"
+CALIB_DATA="${CALIB_DATA:-$REPO_DIR/data/finetune_v2/art${ARTICLE}/sft_train.jsonl}"
+
 echo "==== Requantize GPT-OSS merged art${ARTICLE} bf16 → MXFP4 ===="; date
+echo "Model directory: $MODEL_DIR"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
-python echr/finetune/requantize_gptoss.py --article "$ARTICLE"
+python echr/finetune/requantize_gptoss.py \
+    --article "$ARTICLE" \
+    --model_dir "$MODEL_DIR" \
+    --calib_data "$CALIB_DATA"
+
+FORMAT=$(cat "$MODEL_DIR/FORMAT" 2>/dev/null || echo "unknown")
+[ "$FORMAT" = "mxfp4" ] || { echo "ERROR: expected MXFP4 output, got $FORMAT" >&2; exit 1; }
 
 echo "==== Done: $(date) ===="

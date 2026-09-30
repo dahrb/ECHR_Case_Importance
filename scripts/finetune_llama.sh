@@ -17,6 +17,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --gres=gpu:2
+#SBATCH --no-requeue
 
 set -euo pipefail
 
@@ -28,6 +29,7 @@ case "$TAG" in art3|art6|art8) ;; *) echo "ERROR: TAG must be art3, art6, or art
 # re-quantize float8 (see gotcha memory). bf16 default reproduces the original run.
 MODEL_ID="${MODEL_ID:-meta-llama/Llama-3.3-70B-Instruct}"
 ADAPTER_SUFFIX="${ADAPTER_SUFFIX:-}"
+RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT:-}"
 
 module purge
 module load cuda/12.8.0-gcc14.2.0
@@ -54,7 +56,7 @@ echo "Train: $(wc -l < $DATA_DIR/sft_train.jsonl) examples"
 echo "Val:   $(wc -l < $DATA_DIR/sft_val.jsonl) examples"
 
 ADAPTER_DIR="$REPO_DIR/data/models_v2/llama_lora_${TAG}_2ep${ADAPTER_SUFFIX}"
-if [ -e "$ADAPTER_DIR" ]; then
+if [ -e "$ADAPTER_DIR" ] && [ -z "$RESUME_FROM_CHECKPOINT" ]; then
     echo "ERROR: fresh-run output already exists: $ADAPTER_DIR" >&2
     exit 3
 fi
@@ -82,7 +84,6 @@ if [ -n "${VIRTUAL_ENV:-}" ]; then
 fi
 
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
-export CUDA_VISIBLE_DEVICES=0,1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 echo ""
@@ -98,7 +99,8 @@ python echr/finetune/finetune_echr.py \
     --grad_accum 8 \
     --lora_r 16 \
     --lora_alpha 32 \
-    --max_seq_len "${MAX_SEQ_LEN:-4096}"
+    --max_seq_len "${MAX_SEQ_LEN:-4096}" \
+    ${RESUME_FROM_CHECKPOINT:+--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT"}
 
 echo ""
 echo "Done: $(date). Adapter → $ADAPTER_DIR/adapter_final"

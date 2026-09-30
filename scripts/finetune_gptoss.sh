@@ -14,16 +14,21 @@
 #SBATCH --error=data/data_collection/logs/ft_gptoss_%j.err
 # gpt-oss-120b dequantized (MXFP4→bf16) ≈ 240GB → needs 4× A100 80GB.
 #SBATCH --partition=gpu-a100-lowbig
-#SBATCH --time=24:00:00
+# Two epochs complete in under two hours for the largest per-article split.
+# Keep the request short enough to use scheduler backfill windows.
+#SBATCH --time=03:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=24
 #SBATCH --gres=gpu:4
+#SBATCH --no-requeue
 
 set -euo pipefail
 
 TAG="${TAG:-}"
 case "$TAG" in art3|art6|art8) ;; *) echo "ERROR: TAG must be art3, art6, or art8" >&2; exit 2 ;; esac
+RESUME_FROM_CHECKPOINT="${RESUME_FROM_CHECKPOINT:-}"
+ADAPTER_SUFFIX="${ADAPTER_SUFFIX:-}"
 
 module purge
 module load cuda/12.8.0-gcc14.2.0
@@ -52,8 +57,8 @@ done
 echo "Train: $(wc -l < "$REPO_DIR/$TRAIN_FILE") examples"
 echo "Val:   $(wc -l < "$REPO_DIR/$VAL_FILE") examples"
 
-ADAPTER_DIR="$REPO_DIR/data/models_v2/gptoss_lora_${TAG}_2ep"
-if [ -e "$ADAPTER_DIR" ]; then
+ADAPTER_DIR="$REPO_DIR/data/models_v2/gptoss_lora_${TAG}_2ep${ADAPTER_SUFFIX}"
+if [ -e "$ADAPTER_DIR" ] && [ -z "$RESUME_FROM_CHECKPOINT" ]; then
     echo "ERROR: fresh-run output already exists: $ADAPTER_DIR" >&2
     exit 3
 fi
@@ -80,7 +85,6 @@ if [ -n "${VIRTUAL_ENV:-}" ]; then
 fi
 
 export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
-export CUDA_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 echo ""
@@ -97,7 +101,9 @@ python echr/finetune/finetune_echr.py \
     --lora_r 16 \
     --lora_alpha 32 \
     --max_seq_len "${MAX_SEQ_LEN:-4096}" \
-    --reasoning_effort medium
+    --reasoning_effort medium \
+    --no_eval \
+    ${RESUME_FROM_CHECKPOINT:+--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT"}
 
 echo ""
 echo "Done: $(date). Adapter → $ADAPTER_DIR/adapter_final"

@@ -37,6 +37,7 @@ REASONING_EFFORT="${REASONING_EFFORT:-}"
 NO_THINKING="${NO_THINKING:-false}"
 ENDPOINT="${ENDPOINT:-}"
 ENDPOINT_FILE_PATH="${ENDPOINT_FILE_PATH:-}"
+SFT_JSONL="${SFT_JSONL:-}"
 
 REPO_DIR="/users/sgdbareh/scratch/ECHR_Importance"
 VENV="/mnt/data1/users/sgdbareh/venvs/ECHR_Importance"
@@ -84,6 +85,7 @@ echo "========================================"
     ${REASONING_EFFORT:+--reasoning_effort "$REASONING_EFFORT"} \
     $([ "$COT" = "true" ] && echo "--cot") \
     $([ "$NO_THINKING" = "true" ] && echo "--no_thinking") \
+    ${SFT_JSONL:+--sft_jsonl "$SFT_JSONL"} \
     ${ENDPOINT:+--endpoint "$ENDPOINT"} \
     --resume
 

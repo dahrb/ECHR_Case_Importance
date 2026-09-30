@@ -16,11 +16,19 @@ Output:
 """
 
 import argparse
+import glob
 import json
+import re
 import os
 import re
 import sys
 import time
+
+# Per-session unique prefix: forces a prefix-cache miss on the vLLM server so
+# reasoning_effort=low is applied on fresh KV state (not reused from a prior
+# request that was cached without it).  os.urandom ensures different values
+# across concurrent SLURM jobs even if they start at the same second.
+_CACHE_BUSTER = os.urandom(4).hex() + " "
 
 import pandas as pd
 from openai import OpenAI
@@ -35,6 +43,18 @@ def load_reranker(model_path: str):
     global _reranker
     if _reranker is None:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "rerank"))
+        # Slurm launches many independent 4-CPU shards.  PyTorch otherwise
+        # defaults its inter-op pool to the full host, causing severe
+        # oversubscription when several shards share a node.
+        import torch
+
+        threads = max(1, int(os.environ.get("OMP_NUM_THREADS", "1")))
+        torch.set_num_threads(threads)
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            # Another caller may already have started Torch parallel work.
+            pass
         from sentence_transformers.cross_encoder import CrossEncoder
         _reranker = CrossEncoder(model_path)
         print(f"[reranker] Loaded from {model_path}", flush=True)
@@ -51,7 +71,7 @@ def get_client(endpoint: str) -> OpenAI:
     return OpenAI(api_key="EMPTY", base_url=endpoint)
 
 
-def load_retrieval_results(article: str, retriever: str) -> dict:
+def load_retrieval_results(article: str, retriever: str, k: int = None) -> dict:
     vdb = os.path.join(DATA, "vectordb", f"article{article}")
     if retriever == "bm25":
         path = os.path.join(vdb, "bm25_results.pkl")
@@ -60,7 +80,9 @@ def load_retrieval_results(article: str, retriever: str) -> dict:
     elif retriever == "gold":
         path = os.path.join(vdb, "gold_results.pkl")
     elif retriever == "tgn_kg":
-        path = os.path.join(vdb, "tgn_kg_results.pkl")
+        if k is None:
+            raise ValueError("TGN KG retrieval requires k because its seed set depends on k")
+        path = os.path.join(vdb, f"tgn_kg_k{k}_results.pkl")
     else:  # faiss (default)
         path = os.path.join(vdb, "cosine_qwen3-8b_raw_chunk_2048_results.pkl")
     return pd.read_pickle(path)
@@ -75,34 +97,63 @@ def build_appno_index(outcome_cases: pd.DataFrame) -> dict:
     return idx
 
 
+def build_file_index(outcome_cases: pd.DataFrame) -> dict:
+    """Build exact outcome-file index for temporally resolved KG results."""
+    return {row["File"]: row for _, row in outcome_cases.iterrows()}
+
+
+def build_summary_index(summaries: pd.DataFrame) -> dict:
+    """Build constant-time summary lookup keyed by outcome filename."""
+    return {
+        row["Filename"]: {
+            "200": str(row.get("200 Word Summary", "") or ""),
+            "500": str(row.get("500 Word Summary", "") or ""),
+        }
+        for _, row in summaries.iterrows()
+    }
+
+
 def get_examples(
     retrieved_appnos: list,
     appno_index: dict,
-    summaries: pd.DataFrame,
+    summaries: dict,
     k: int,
     n_retrieve: int = None,
+    file_index: dict = None,
+    query_date=None,
 ) -> dict:
     """
     Map top retrieved appnos to {file_id: (importance, summary)} dict.
     Returns up to n_retrieve entries (use k when not reranking).
+    query_date: if provided, only outcome documents strictly before this date are used.
     """
     limit = n_retrieve if n_retrieve is not None else k
     examples = {}
     for appno_raw in retrieved_appnos:
         if len(examples) >= limit:
             break
-        first = appno_raw.split(";")[0].strip()
-        rows = appno_index.get(first, [])
-        if not rows:
-            continue
-        # take the most recent case
-        row = sorted(rows, key=lambda r: r["date"])[-1]
+        if file_index and appno_raw in file_index:
+            # KG results identify the exact pre-query graph node. Do not remap
+            # it to a later outcome document for the same application.
+            row = file_index[appno_raw]
+        else:
+            first = appno_raw.split(";")[0].strip()
+            rows = appno_index.get(first, [])
+            if not rows:
+                continue
+            # Enforce query date cutoff: exclude docs on or after outcome date.
+            if query_date is not None:
+                rows = [r for r in rows if r["date"] < query_date]
+            if not rows:
+                continue
+            # VDB/BM25 results are application numbers; preserve legacy mapping.
+            row = sorted(rows, key=lambda r: r["date"])[-1]
         file_id = row["File"]
         importance = int(row["importance"])
-        summ_rows = summaries[summaries["Filename"] == file_id]
-        if summ_rows.empty:
+        summary_record = summaries.get(file_id)
+        if not summary_record:
             continue
-        summary = summ_rows.iloc[0].get("500 Word Summary", "")
+        summary = summary_record.get("500", "")
         if not summary or len(str(summary)) < 50:
             continue
         examples[file_id] = (importance, str(summary))
@@ -114,15 +165,48 @@ def rerank_examples(
     examples: dict,
     k: int,
     reranker,
+    rerank_texts: dict = None,
 ) -> dict:
-    """Re-rank candidate examples by CrossEncoder score, return top-k."""
+    """Re-rank with the training-matched 200-word candidate summaries.
+
+    The returned ``examples`` retain 500-word summaries for the LLM prompt.
+    This deliberately separates retrieval scoring text from demonstration text.
+    """
     if len(examples) <= k:
         return examples
     file_ids = list(examples.keys())
-    pairs = [(query_text.lower(), examples[fid][1].lower()) for fid in file_ids]
+    rerank_texts = rerank_texts or {}
+    pairs = [
+        (query_text.lower(), rerank_texts.get(fid, examples[fid][1]).lower())
+        for fid in file_ids
+    ]
     scores = reranker.predict(pairs)
     ranked = sorted(zip(scores, file_ids), reverse=True)
     return {fid: examples[fid] for _, fid in ranked[:k]}
+
+
+def render_retrieval_prompt(
+    row,
+    article: str,
+    examples: dict,
+    text: int,
+    max_tokens: int,
+    max_model_len: int,
+) -> str:
+    """Render a retrieval prompt within a conservative aggregate context budget."""
+    available_tokens = max(1000, max_model_len - max_tokens - 768)
+    max_prompt_chars = int(available_tokens * 2.5)
+    component_count = len(examples) + 1
+    max_chars = max(500, (max_prompt_chars - 2500) // component_count)
+    prompt = retrieval_prompt(row, article, examples, text=text, max_chars=max_chars)
+    while len(prompt) > max_prompt_chars and max_chars > 500:
+        shrink = max_prompt_chars / len(prompt)
+        next_max_chars = max(500, int(max_chars * shrink * 0.95))
+        if next_max_chars >= max_chars:
+            next_max_chars = max_chars - 1
+        max_chars = next_max_chars
+        prompt = retrieval_prompt(row, article, examples, text=text, max_chars=max_chars)
+    return prompt
 
 
 def predict_one(
@@ -138,23 +222,32 @@ def predict_one(
     no_thinking: bool = False,
     max_retries: int = 3,
     retry_delay: float = 5.0,
+    prompt_override: str = None,
+    n_examples_override: int = None,
 ) -> dict:
-    # Budget: model context - output tokens - prompt template overhead (~500 tok) - summary chars
-    # Use 3 chars/token (conservative for legal text); ensure at least 5000 chars
-    summaries_chars = sum(len(str(s)) for _, s in examples.values()) if examples else 0
-    available_tokens = int((max_model_len - max_tokens - 500) * 0.90)  # 10% safety margin
-    max_chars = max(5000, available_tokens * 3 - summaries_chars - 1500)
-    prompt = retrieval_prompt(row, article, examples, text=text, max_chars=max_chars)
+    # Keep the complete rendered prompt comfortably below the server context
+    # window. A per-field minimum is unsafe for k=10 because ten independently
+    # truncated demonstrations can exceed the intended aggregate budget.
+    prompt = prompt_override or render_retrieval_prompt(
+        row, article, examples, text, max_tokens, max_model_len
+    )
+    n_examples = len(examples) if n_examples_override is None else n_examples_override
     extra = {}
     if reasoning_effort:
         extra["reasoning_effort"] = reasoning_effort
+        # Prefix-cache isolation: concurrent requests share the same system-message
+        # tokens; a stale or wrong-effort cache entry would silently suppress RE.
+        # cache_salt makes each request's cache key unique, ensuring fresh KV
+        # computation with the correct reasoning_effort on every call.
+        extra["cache_salt"] = os.urandom(8).hex()
     if no_thinking:
         extra.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
+    messages = [{"role": "user", "content": prompt}]
     for attempt in range(max_retries):
         try:
             resp = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 max_tokens=max_tokens,
                 temperature=0.0,
                 extra_body=extra,
@@ -182,20 +275,56 @@ def predict_one(
             parsed = json.loads(raw)
             pred_raw = str(parsed.get("Case Importance", "")).strip().lower()
             pred = IMPORTANCE_MAP.get(pred_raw, None)
+            if pred is None and attempt < max_retries - 1:
+                print(
+                    f"  Retry {attempt + 1}/{max_retries}: invalid importance "
+                    f"label {pred_raw!r}",
+                    flush=True,
+                )
+                messages.extend([
+                    {"role": "assistant", "content": content},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your Case Importance value must be exactly one of: "
+                            "1, 2, 3, key_case. Reassess the case and return only "
+                            "the required JSON object with one of those values."
+                        ),
+                    },
+                ])
+                continue
             return {
                 "raw_prediction": pred_raw,
                 "prediction": pred,
                 "reasoning": parsed.get("Reasoning", ""),
                 "raw_output": raw,
-                "n_examples": len(examples),
+                "n_examples": n_examples,
             }
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, KeyError) as e:
+            match = re.search(r'"Case Importance"\s*:\s*"(key_case|[1-3])"', raw)
+            if match:
+                pred_raw = match.group(1).lower()
+                return {"raw_prediction": pred_raw, "prediction": IMPORTANCE_MAP[pred_raw],
+                        "reasoning": "", "raw_output": raw, "n_examples": n_examples}
+            if attempt < max_retries - 1:
+                print(
+                    f"  Retry {attempt + 1}/{max_retries}: invalid JSON: {e}",
+                    flush=True,
+                )
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Return only valid JSON with Case Importance set to exactly "
+                        "one of: 1, 2, 3, key_case."
+                    ),
+                })
+                continue
             return {
                 "raw_prediction": raw if "raw" in dir() else "",
                 "prediction": None,
                 "reasoning": "",
                 "raw_output": raw if "raw" in dir() else "",
-                "n_examples": len(examples),
+                "n_examples": n_examples,
             }
         except Exception as e:
             if attempt < max_retries - 1:
@@ -235,9 +364,13 @@ def main():
                         help="Server max_model_len; used to compute prompt budget")
     parser.add_argument("--rerank_pool", type=int, default=50,
                         help="Candidate pool size before reranking (default 50)")
+    parser.add_argument("--prompt_dir", default=None,
+                        help="Read complete pre-materialized prompt shards from this directory")
+    parser.add_argument("--run_tag", default=None,
+                        help="Append a tag to the result filename to isolate a rerun from legacy output")
     args = parser.parse_args()
 
-    if args.rerank and not args.rerank_model:
+    if args.rerank and not args.rerank_model and not args.prompt_dir:
         raise ValueError("--rerank requires --rerank_model <path>")
 
     if args.endpoint:
@@ -247,40 +380,97 @@ def main():
     else:
         raise RuntimeError(f"No endpoint and {ENDPOINT_FILE} not found.")
 
-    reranker = load_reranker(args.rerank_model) if args.rerank else None
+    reranker = load_reranker(args.rerank_model) if args.rerank and not args.prompt_dir else None
 
     print(
         f"[art {args.article}] vLLM={endpoint} model={args.model} "
-        f"retriever={args.retriever} k={args.k} rerank={args.rerank} split={args.split}",
+        f"retriever={args.retriever} k={args.k} rerank={args.rerank} "
+        f"rerank_candidate_summary={'200-word' if args.rerank else 'n/a'} split={args.split}",
         flush=True,
     )
     client = get_client(endpoint)
 
-    split_file = "comm_test.pkl" if args.split == "test" else "comm_valid.pkl"
-    cases_path = os.path.join(
-        DATA, "processed", f"article{args.article}", "splits", split_file
-    )
-    cases = pd.read_pickle(cases_path)
-    print(f"[art {args.article}] {len(cases)} cases in {args.split} split", flush=True)
+    prompt_records = None
+    if args.prompt_dir:
+        prompt_files = sorted(glob.glob(os.path.join(args.prompt_dir, "part-*-of-*.jsonl")))
+        shard_pattern = re.compile(r"part-(\d+)-of-(\d+)\.jsonl$")
+        shard_pairs = [shard_pattern.search(path) for path in prompt_files]
+        if not prompt_files or any(match is None for match in shard_pairs):
+            raise RuntimeError(f"No valid prompt shards found in {args.prompt_dir}")
+        shard_totals = {int(match.group(2)) for match in shard_pairs}
+        shard_indices = {int(match.group(1)) for match in shard_pairs}
+        if len(shard_totals) != 1:
+            raise RuntimeError(f"Inconsistent prompt shard totals in {args.prompt_dir}")
+        shard_total = shard_totals.pop()
+        if shard_indices != set(range(shard_total)):
+            missing = sorted(set(range(shard_total)) - shard_indices)
+            raise RuntimeError(f"Incomplete prompt directory {args.prompt_dir}; missing shards {missing}")
 
-    outcome_cases = pd.read_pickle(
-        os.path.join(DATA, "processed", f"article{args.article}", "outcome_cases.pkl")
-    )
-    summaries = pd.read_pickle(
-        os.path.join(DATA, "processed", f"article{args.article}", "outcome_summaries.pkl")
-    )
-    retrieval_results = load_retrieval_results(args.article, args.retriever)
-    appno_index = build_appno_index(outcome_cases)
-    print(
-        f"[art {args.article}] outcome_cases={len(outcome_cases)}, "
-        f"summaries={len(summaries)}, retrieval_results={len(retrieval_results)}",
-        flush=True,
-    )
+        by_filename = {}
+        for path in prompt_files:
+            with open(path) as handle:
+                for line in handle:
+                    record = json.loads(line)
+                    if str(record["article"]) != str(args.article):
+                        raise ValueError(f"Article mismatch in {path}: {record['article']}")
+                    if record["retriever"] != args.retriever or int(record["k"]) != args.k:
+                        raise ValueError(f"Retrieval configuration mismatch in {path}")
+                    if bool(record["rerank"]) != args.rerank:
+                        raise ValueError(f"Rerank configuration mismatch in {path}")
+                    if int(record["text"]) != args.text or record["split"] != args.split:
+                        raise ValueError(f"Prompt configuration mismatch in {path}")
+                    if int(record["max_model_len"]) > args.max_model_len:
+                        raise ValueError(
+                            f"Prompt context budget exceeds --max_model_len in {path}"
+                        )
+                    if int(record["max_tokens"]) < args.max_tokens:
+                        raise ValueError(
+                            f"Prompt output reserve is below --max_tokens in {path}"
+                        )
+                    if record["Filename"] in by_filename:
+                        raise ValueError(f"Duplicate prompt for {record['Filename']} in {path}")
+                    by_filename[record["Filename"]] = record
+        prompt_records = sorted(by_filename.values(), key=lambda record: record["case_index"])
+        case_indices = [int(record["case_index"]) for record in prompt_records]
+        if case_indices != list(range(len(prompt_records))):
+            raise RuntimeError(
+                f"Prompt directory {args.prompt_dir} has missing or duplicate case indices"
+            )
+        cases = prompt_records
+        print(
+            f"[art {args.article}] loaded {len(cases)} materialized prompts "
+            f"from {shard_total} shards",
+            flush=True,
+        )
+    else:
+        split_file = "comm_test.pkl" if args.split == "test" else "comm_valid.pkl"
+        cases_path = os.path.join(
+            DATA, "processed", f"article{args.article}", "splits", split_file
+        )
+        cases = pd.read_pickle(cases_path)
+        print(f"[art {args.article}] {len(cases)} cases in {args.split} split", flush=True)
+
+        outcome_cases = pd.read_pickle(
+            os.path.join(DATA, "processed", f"article{args.article}", "outcome_cases.pkl")
+        )
+        summaries = pd.read_pickle(
+            os.path.join(DATA, "processed", f"article{args.article}", "outcome_summaries.pkl")
+        )
+        summary_index = build_summary_index(summaries)
+        retrieval_results = load_retrieval_results(args.article, args.retriever, args.k)
+        appno_index = build_appno_index(outcome_cases)
+        file_index = build_file_index(outcome_cases)
+        print(
+            f"[art {args.article}] outcome_cases={len(outcome_cases)}, "
+            f"summaries={len(summaries)}, retrieval_results={len(retrieval_results)}",
+            flush=True,
+        )
 
     safe_model = args.model.replace("/", "_").replace(":", "_")
     rr_suffix = "_rerank" if args.rerank else ""
+    tag_suffix = f"_{args.run_tag}" if args.run_tag else ""
     out_name = (
-        f"retrieval_{args.retriever}_k{args.k}{rr_suffix}_text{args.text}_{args.split}_{safe_model}.jsonl"
+        f"retrieval_{args.retriever}_k{args.k}{rr_suffix}_text{args.text}_{args.split}_{safe_model}{tag_suffix}.jsonl"
     )
     out_dir = os.path.join(DATA, "results", f"article{args.article}")
     os.makedirs(out_dir, exist_ok=True)
@@ -289,24 +479,27 @@ def main():
     _MODEL_ALIASES = {"Llama-3.3-70B": "Llama-3.3-70B-Instruct-FP8", "Llama-3.3-70B-Instruct-FP8": "Llama-3.3-70B"}
     done_filenames: set = set()
     if args.resume:
-        _alias = _MODEL_ALIASES.get(safe_model)
+        _alias = _MODEL_ALIASES.get(safe_model) if not args.run_tag else None
         _paths = [out_path] + ([os.path.join(out_dir, out_name.replace(safe_model, _alias))] if _alias else [])
         for _p in _paths:
             if os.path.exists(_p):
                 with open(_p) as f:
                     for line in f:
                         try:
-                            done_filenames.add(json.loads(line)["Filename"])
+                            record = json.loads(line)
+                            if record.get("prediction") is not None:
+                                done_filenames.add(record["Filename"])
                         except Exception:
                             pass
         if done_filenames:
             print(f"  Resuming: {len(done_filenames)} already done", flush=True)
 
     if args.limit:
-        cases = cases.head(args.limit)
+        cases = cases[:args.limit] if prompt_records is not None else cases.head(args.limit)
 
     with open(out_path, "a" if args.resume else "w") as fout:
-        for i, (_, row) in enumerate(cases.iterrows()):
+        rows = enumerate(cases) if prompt_records is not None else cases.iterrows()
+        for i, row in rows:
             filename = row.get("Filename", f"row_{i}")
             if filename in done_filenames:
                 continue
@@ -314,17 +507,46 @@ def main():
             if i % 100 == 0:
                 print(f"  [{i}/{len(cases)}] {filename}", flush=True)
 
-            retrieved = retrieval_results.get(filename, [])
-            n_retrieve = args.rerank_pool if reranker else None
-            examples = get_examples(retrieved, appno_index, summaries, args.k, n_retrieve)
-            if reranker and examples:
-                query_text = str(row.get("Subject Matter", ""))
-                examples = rerank_examples(query_text, examples, args.k, reranker)
+            if prompt_records is not None:
+                examples = {}
+                result = predict_one(
+                    client, row, args.article, args.model, examples, text=args.text,
+                    max_tokens=args.max_tokens, max_model_len=args.max_model_len,
+                    reasoning_effort=args.reasoning_effort,
+                    no_thinking=args.no_thinking,
+                    prompt_override=row["prompt"],
+                    n_examples_override=int(row["n_examples"]),
+                )
+            else:
+                retrieved = retrieval_results.get(filename, [])
+                n_retrieve = args.rerank_pool if reranker else None
+                _doc_date = row.get("doc_date")
+                _query_date = pd.Timestamp(_doc_date) if _doc_date else None
+                examples = get_examples(
+                    retrieved,
+                    appno_index,
+                    summary_index,
+                    args.k,
+                    n_retrieve,
+                    file_index=file_index,
+                    query_date=_query_date,
+                )
+                if reranker and examples:
+                    query_text = str(row.get("Subject Matter", ""))
+                    rerank_texts = {
+                        file_id: summary_index[file_id].get("200") or summary_500
+                        for file_id, (_, summary_500) in examples.items()
+                    }
+                    examples = rerank_examples(
+                        query_text, examples, args.k, reranker, rerank_texts
+                    )
 
-            result = predict_one(client, row, args.article, args.model, examples, text=args.text,
-                                 max_tokens=args.max_tokens, max_model_len=args.max_model_len,
-                                 reasoning_effort=args.reasoning_effort,
-                                 no_thinking=args.no_thinking)
+                result = predict_one(
+                    client, row, args.article, args.model, examples, text=args.text,
+                    max_tokens=args.max_tokens, max_model_len=args.max_model_len,
+                    reasoning_effort=args.reasoning_effort,
+                    no_thinking=args.no_thinking,
+                )
             record = {
                 "Filename": filename,
                 "importance": int(row["importance"]) if pd.notna(row.get("importance")) else None,

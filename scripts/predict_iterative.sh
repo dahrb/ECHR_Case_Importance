@@ -27,6 +27,13 @@ TEXT="${TEXT:-1}"
 SPLIT="${SPLIT:-test}"
 ENDPOINT="${ENDPOINT:-}"
 ENDPOINT_FILE_PATH="${ENDPOINT_FILE_PATH:-}"
+PROMPT_DIR="${PROMPT_DIR:-}"
+RUN_TAG="${RUN_TAG:-}"
+MAX_TOKENS="${MAX_TOKENS:-600}"
+# Iterative evaluation uses medium reasoning; callers may explicitly override it
+# for a deliberately labelled ablation only.
+REASONING_EFFORT="${REASONING_EFFORT:-medium}"
+LEVEL_CONCURRENCY="${LEVEL_CONCURRENCY:-4}"
 
 REPO_DIR="/users/sgdbareh/scratch/ECHR_Importance"
 VENV="/mnt/data1/users/sgdbareh/venvs/ECHR_Importance"
@@ -60,16 +67,25 @@ export PYTHONPATH="$REPO_DIR${PYTHONPATH:+:$PYTHONPATH}"
 echo "========================================"
 echo "  Iterative-Prompting — Article $ARTICLE"
 echo "  model=$MODEL  text=$TEXT  split=$SPLIT"
+echo "  prompt_dir=${PROMPT_DIR:-dynamic} level_concurrency=$LEVEL_CONCURRENCY"
 echo "  Started: $(date)"
 echo "========================================"
 
-"$VENV/bin/python" echr/prediction/run_iterative_predictions.py \
+ARGS=(
     --article "$ARTICLE" \
     --model "$MODEL" \
     --text "$TEXT" \
     --split "$SPLIT" \
     --resume \
-    ${ENDPOINT:+--endpoint "$ENDPOINT"}
+    --max-tokens "$MAX_TOKENS" \
+    --reasoning-effort "$REASONING_EFFORT" \
+    --level-concurrency "$LEVEL_CONCURRENCY"
+)
+[ -n "$ENDPOINT" ] && ARGS+=(--endpoint "$ENDPOINT")
+[ -n "$PROMPT_DIR" ] && ARGS+=(--prompt-dir "$PROMPT_DIR")
+[ -n "$RUN_TAG" ] && ARGS+=(--run-tag "$RUN_TAG")
+
+"$VENV/bin/python" echr/prediction/run_iterative_predictions.py "${ARGS[@]}"
 
 echo "========================================"
 echo "  Done: $(date)"

@@ -14,6 +14,7 @@
 #   RERANK: 1 to enable LegalBERT cross-encoder reranking
 #   RERANK_MODEL: path to saved CrossEncoder model dir (required if RERANK=1)
 #   RERANK_POOL: candidate pool size before reranking (default 50)
+#   PROMPT_DIR: complete pre-materialized prompt shard directory (preferred)
 #
 #SBATCH --job-name=predict_rag
 #SBATCH --output=data/data_collection/logs/predict_rag_art${ARTICLE}_%j.out
@@ -30,7 +31,7 @@ set -euo pipefail
 
 MODEL="${MODEL:-gpt-oss-120b}"
 RETRIEVER="${RETRIEVER:-bm25}"
-K="${K:-3}"
+K="${K:-${SLURM_ARRAY_TASK_ID:-3}}"
 TEXT="${TEXT:-1}"
 SPLIT="${SPLIT:-test}"
 RERANK="${RERANK:-0}"
@@ -42,6 +43,8 @@ REASONING_EFFORT="${REASONING_EFFORT:-}"
 NO_THINKING="${NO_THINKING:-false}"
 ENDPOINT="${ENDPOINT:-}"
 ENDPOINT_FILE_PATH="${ENDPOINT_FILE_PATH:-}"
+PROMPT_DIR="${PROMPT_DIR:-}"
+RUN_TAG="${RUN_TAG:-}"
 
 REPO_DIR="/users/sgdbareh/scratch/ECHR_Importance"
 VENV="/mnt/data1/users/sgdbareh/venvs/ECHR_Importance"
@@ -78,26 +81,39 @@ echo "  model=$MODEL  retriever=$RETRIEVER  k=$K  text=$TEXT  split=$SPLIT  rera
 echo "  Started: $(date)"
 echo "========================================"
 
-RR_FLAGS=""
+args=(
+    --article "$ARTICLE"
+    --model "$MODEL"
+    --retriever "$RETRIEVER"
+    --k "$K"
+    --text "$TEXT"
+    --split "$SPLIT"
+    --max_tokens "$MAX_TOKENS"
+    --max_model_len "$MAX_MODEL_LEN"
+    --resume
+)
+
 if [ "$RERANK" = "1" ]; then
     : "${RERANK_MODEL:?RERANK=1 requires RERANK_MODEL to be set}"
-    RR_FLAGS="--rerank --rerank_model $RERANK_MODEL --rerank_pool $RERANK_POOL"
+    args+=(--rerank --rerank_model "$RERANK_MODEL" --rerank_pool "$RERANK_POOL")
+fi
+if [ -n "$REASONING_EFFORT" ]; then
+    args+=(--reasoning_effort "$REASONING_EFFORT")
+fi
+if [ "$NO_THINKING" = "true" ]; then
+    args+=(--no_thinking)
+fi
+if [ -n "$PROMPT_DIR" ]; then
+    args+=(--prompt_dir "$PROMPT_DIR")
+fi
+if [ -n "$RUN_TAG" ]; then
+    args+=(--run_tag "$RUN_TAG")
+fi
+if [ -n "$ENDPOINT" ]; then
+    args+=(--endpoint "$ENDPOINT")
 fi
 
-"$VENV/bin/python" echr/prediction/run_retrieval_predictions.py \
-    --article "$ARTICLE" \
-    --model "$MODEL" \
-    --retriever "$RETRIEVER" \
-    --k "$K" \
-    --text "$TEXT" \
-    --split "$SPLIT" \
-    --max_tokens "$MAX_TOKENS" \
-    --max_model_len "$MAX_MODEL_LEN" \
-    ${REASONING_EFFORT:+--reasoning_effort "$REASONING_EFFORT"} \
-    $([ "$NO_THINKING" = "true" ] && echo "--no_thinking") \
-    --resume \
-    $RR_FLAGS \
-    ${ENDPOINT:+--endpoint "$ENDPOINT"}
+"$VENV/bin/python" echr/prediction/run_retrieval_predictions.py "${args[@]}"
 
 echo "========================================"
 echo "  Done: $(date)"

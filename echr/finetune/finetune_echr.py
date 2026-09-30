@@ -132,6 +132,10 @@ def main() -> None:
     parser.add_argument("--reasoning_effort", default=None,
                         choices=["low", "medium", "high"],
                         help="Recorded inference/evaluation setting for GPT-OSS")
+    parser.add_argument("--resume_from_checkpoint", default=None,
+                        help="Checkpoint from this same fresh run after preemption")
+    parser.add_argument("--no_eval", action="store_true",
+                        help="Save each epoch but validate later by generation (needed for GPT-OSS memory)")
     args = parser.parse_args()
 
     if args.epochs != 2:
@@ -223,17 +227,19 @@ def main() -> None:
         gradient_checkpointing_kwargs=checkpoint_kwargs,
         optim="adamw_8bit", learning_rate=args.lr, lr_scheduler_type="cosine",
         warmup_ratio=args.warmup_ratio, fp16=False, bf16=True,
-        logging_steps=5, eval_strategy="epoch", save_strategy="epoch",
-        save_total_limit=2, load_best_model_at_end=True,
-        metric_for_best_model="eval_loss", greater_is_better=False,
+        logging_steps=5, eval_strategy="no" if args.no_eval else "epoch",
+        save_strategy="epoch", save_total_limit=2,
+        load_best_model_at_end=not args.no_eval,
+        metric_for_best_model=None if args.no_eval else "eval_loss",
+        greater_is_better=False,
         prediction_loss_only=True, report_to="none", dataloader_num_workers=2,
         max_length=args.max_seq_len, packing=False, completion_only_loss=True,
     )
     trainer = SFTTrainer(
         model=model, processing_class=tokenizer, train_dataset=train_ds,
-        eval_dataset=val_ds, args=config,
+        eval_dataset=None if args.no_eval else val_ds, args=config,
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=args.resume_from_checkpoint)
     adapter_path = output_dir / "adapter_final"
     trainer.model.save_pretrained(adapter_path)
     tokenizer.save_pretrained(adapter_path)
@@ -248,6 +254,7 @@ def main() -> None:
         "loss_scope": "assistant_completion_only",
         "truncation_policy": "truncate_case_prompt_end_preserve_full_completion",
         "reasoning_effort_for_inference": args.reasoning_effort,
+        "in_loop_evaluation": not args.no_eval,
         "token_audit": {"train": train_token_audit, "validation": val_token_audit},
     }
     (output_dir / "finetune_config.json").write_text(json.dumps(record, indent=2) + "\n")

@@ -47,16 +47,23 @@ fi
 
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTORCH_ALLOC_CONF=expandable_segments:True
-export PORT=8002
+export PORT="${PORT:-8002}"
 export NODE_NAME=$(hostname)
+TP="${TP:-2}"
+MODEL_NAME="${MODEL_NAME:-Llama-3.3-70B-Instruct-FP8}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-32}"
 
 REPO_DIR="/users/sgdbareh/scratch/ECHR_Importance"
 mkdir -p "$REPO_DIR/data/data_collection/logs"
 
 ENDPOINT="http://${NODE_NAME}:${PORT}/v1"
-echo "$ENDPOINT" > "$REPO_DIR/data/vllm_Llama-3.3-70B_endpoint.txt"
-echo "$ENDPOINT" > "$REPO_DIR/data/vllm_Llama-3.3-70B-Instruct-FP8_endpoint.txt"
-MNT_EP="/mnt/scratch/users/sgdbareh/ECHR_Importance/data/vllm_Llama-3.3-70B-Instruct-FP8_endpoint.txt"
+ENDPOINT_FILE="${ENDPOINT_FILE:-$REPO_DIR/data/vllm_Llama-3.3-70B-Instruct-FP8_endpoint.txt}"
+echo "$ENDPOINT" > "$ENDPOINT_FILE"
+if [ "$ENDPOINT_FILE" = "$REPO_DIR/data/vllm_Llama-3.3-70B-Instruct-FP8_endpoint.txt" ]; then
+    echo "$ENDPOINT" > "$REPO_DIR/data/vllm_Llama-3.3-70B_endpoint.txt"
+fi
+MNT_EP="/mnt/scratch/users/sgdbareh/ECHR_Importance/data/$(basename "$ENDPOINT_FILE")"
 [ -d "$(dirname "$MNT_EP")" ] && echo "$ENDPOINT" > "$MNT_EP" || true
 
 echo "=========================================================="
@@ -70,15 +77,15 @@ echo "=========================================================="
 # --enforce-eager: disables CUDA graph compilation to prevent WorkerProc crash on first inference
 # (vLLM 0.19.0 / FP8 / H100-PCIe -- compiled graph crashes in _model_forward on first real batch)
 vllm serve nvidia/Llama-3.3-70B-Instruct-FP8 \
-    --tensor-parallel-size 2 \
+    --tensor-parallel-size "$TP" \
     --gpu-memory-utilization 0.90 \
     --host 0.0.0.0 \
     --port $PORT \
-    --served-model-name "Llama-3.3-70B-Instruct-FP8" \
+    --served-model-name "$MODEL_NAME" \
     --disable-custom-all-reduce \
     --enable-prefix-caching \
     --enforce-eager \
-    --max-model-len 32000 \
-    --max-num-seqs 32 \
-    --max-num-batched-tokens 32000 \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --max-num-seqs "$MAX_NUM_SEQS" \
+    --max-num-batched-tokens "$MAX_MODEL_LEN" \
     --attention-config '{"flash_attn_version":2}'

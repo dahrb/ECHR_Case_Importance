@@ -12,9 +12,16 @@ Output:
 
 import argparse
 import json
+import re
 import os
 import re
 import time
+
+# Per-session unique prefix: forces a prefix-cache miss on the vLLM server so
+# reasoning_effort=low is applied on fresh KV state (not reused from a prior
+# request that was cached without it).  os.urandom ensures different values
+# across concurrent SLURM jobs even if they start at the same second.
+_CACHE_BUSTER = os.urandom(4).hex() + " "
 
 import pandas as pd
 from openai import OpenAI
@@ -37,11 +44,14 @@ def predict_one(client: OpenAI, row, article: str, model: str, condition: str = 
                 max_model_len: int = 32000,
                 reasoning_effort: str = None,
                 no_thinking: bool = False,
+                prompt_override: str = None,
                 max_retries: int = 3, retry_delay: float = 5.0) -> dict:
     # Budget: model context - output tokens - prompt template overhead (~500 tok)
     # Use 3 chars/token (conservative for legal text) + 10% safety margin
     max_chars = max(5000, int((max_model_len - max_tokens - 500) * 0.90) * 3 - 1500)
-    if condition == "court":
+    if prompt_override is not None:
+        prompt = prompt_override
+    elif condition == "court":
         prompt = court_prompt(row, article, text=text, max_chars=max_chars)
     else:
         prompt = base_zero_shot_prompt(row, article, text=text, cot=cot, max_chars=max_chars)
@@ -49,8 +59,11 @@ def predict_one(client: OpenAI, row, article: str, model: str, condition: str = 
     extra = {}
     if reasoning_effort:
         extra["reasoning_effort"] = reasoning_effort
-    # For LoRA adapter models: disable thinking entirely — RE=medium is not enforced by
-    # vLLM through --enable-lora, so the model exhausts its budget on thinking tokens.
+        # Prefix-cache isolation: concurrent requests share the same system-message
+        # tokens; a stale or wrong-effort cache entry would silently suppress RE.
+        # cache_salt makes each request's cache key unique, ensuring fresh KV
+        # computation with the correct reasoning_effort on every call.
+        extra["cache_salt"] = os.urandom(8).hex()
     if no_thinking:
         extra.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
     for attempt in range(max_retries):
@@ -105,6 +118,13 @@ def predict_one(client: OpenAI, row, article: str, model: str, condition: str = 
                 "raw_output": raw,
             }
         except (json.JSONDecodeError, KeyError):
+            # Some otherwise usable model replies contain unescaped quotes in
+            # the free-text reasoning.  Preserve an explicit valid label.
+            match = re.search(r'"Case Importance"\s*:\s*"(key_case|[1-3])"', raw)
+            if condition != "court" and match:
+                pred_raw = match.group(1).lower()
+                return {"raw_prediction": pred_raw, "prediction": IMPORTANCE_MAP[pred_raw],
+                        "reasoning": "", "raw_output": raw}
             return {
                 "raw_prediction": raw if 'raw' in dir() else "",
                 "prediction": None,
@@ -132,6 +152,8 @@ def main():
                         help="vLLM base URL (default: read from data/vllm_endpoint.txt)")
     parser.add_argument("--split", default="test", choices=["test", "valid", "train"],
                         help="Which split to run on")
+    parser.add_argument("--sft_jsonl", default=None,
+                        help="Use prompts/metadata from an audited SFT JSONL (validation only)")
     parser.add_argument("--cot", action="store_true",
                         help="Chain-of-thought: add step-by-step reasoning instruction")
     parser.add_argument("--resume", action="store_true",
@@ -163,16 +185,29 @@ def main():
           f"condition={args.condition} split={args.split}")
     client = get_client(endpoint)
 
-    split_file = {"test": "comm_test.pkl", "valid": "comm_valid.pkl", "train": "comm_train.pkl"}[args.split]
-    cases_path = os.path.join(
-        DATA, "processed", f"article{args.article}", "splits", split_file
-    )
-    cases = pd.read_pickle(cases_path)
-    print(f"[art {args.article}] {len(cases)} cases in {args.split} split")
+    if args.sft_jsonl:
+        if args.split != "valid":
+            raise ValueError("--sft_jsonl is restricted to --split valid")
+        with open(args.sft_jsonl) as handle:
+            sft_records = [json.loads(line) for line in handle if line.strip()]
+        cases = [{
+            "Filename": record["metadata"]["filename"],
+            "importance": record["metadata"]["gold"],
+            "_prompt": record["messages"][0]["content"],
+        } for record in sft_records]
+        output_split = "valid_v2"
+    else:
+        split_file = {"test": "comm_test.pkl", "valid": "comm_valid.pkl", "train": "comm_train.pkl"}[args.split]
+        cases_path = os.path.join(
+            DATA, "processed", f"article{args.article}", "splits", split_file
+        )
+        cases = pd.read_pickle(cases_path)
+        output_split = args.split
+    print(f"[art {args.article}] {len(cases)} cases in {output_split} split")
 
     safe_model = args.model.replace("/", "_").replace(":", "_")
     cot_suffix = "_cot" if args.cot else ""
-    out_name = f"{args.condition}{cot_suffix}_text{args.text}_{args.split}_{safe_model}.jsonl"
+    out_name = f"{args.condition}{cot_suffix}_text{args.text}_{output_split}_{safe_model}.jsonl"
     out_dir = os.path.join(DATA, "results", f"article{args.article}")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, out_name)
@@ -187,17 +222,23 @@ def main():
                 with open(_p) as f:
                     for line in f:
                         try:
-                            done_filenames.add(json.loads(line)["Filename"])
+                            record = json.loads(line)
+                            # A transport failure or unparsable response is not a
+                            # completed prediction.  Retrying these rows matters
+                            # when a serving job is preempted mid-run.
+                            if record.get("prediction") is not None:
+                                done_filenames.add(record["Filename"])
                         except Exception:
                             pass
         if done_filenames:
             print(f"  Resuming: {len(done_filenames)} already done")
 
     if args.limit:
-        cases = cases.head(args.limit)
+        cases = cases[:args.limit] if isinstance(cases, list) else cases.head(args.limit)
 
     with open(out_path, "a" if args.resume else "w") as fout:
-        for i, (_, row) in enumerate(cases.iterrows()):
+        rows = enumerate(cases) if isinstance(cases, list) else cases.iterrows()
+        for i, row in rows:
             filename = row.get("Filename", f"row_{i}")
             if filename in done_filenames:
                 continue
@@ -210,7 +251,8 @@ def main():
                                   max_tokens=args.max_tokens,
                                   max_model_len=args.max_model_len,
                                   reasoning_effort=args.reasoning_effort,
-                                  no_thinking=args.no_thinking)
+                                  no_thinking=args.no_thinking,
+                                  prompt_override=row.get("_prompt"))
             record = {
                 "Filename": filename,
                 "importance": int(row["importance"]) if pd.notna(row.get("importance")) else None,

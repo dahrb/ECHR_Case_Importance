@@ -234,12 +234,23 @@ class CrossEncoderMod(CrossEncoder):
 
 
 def extract_scalar(score) -> float:
-    """Extract a scalar AP from evaluator return value (dict in newer sentence-transformers)."""
+    """Extract Average Precision from newer sentence-transformers evaluator output.
+
+    Newer releases namespace metric keys (for example,
+    ``Art8-Relevance_average_precision``).  Selecting ``max(score.values())``
+    is unsafe because the dict also contains classification thresholds, which
+    can be close to one and caused Art. 8 checkpoint selection to retain an
+    epoch-zero model despite poor AP.
+    """
     if isinstance(score, dict):
-        for key in ("average_precision", "Average_Precision", "Average Precision", "ap", "f1", "accuracy"):
-            if key in score:
-                return float(score[key])
-        return float(max(score.values()))
+        for key, value in score.items():
+            normalised = key.lower().replace(" ", "_")
+            if "average_precision" in normalised or normalised.endswith("_ap"):
+                return float(value)
+        raise ValueError(
+            "Evaluator did not return Average Precision; refusing to select a "
+            f"checkpoint from non-AP metrics: {sorted(score)}"
+        )
     return float(score)
 
 

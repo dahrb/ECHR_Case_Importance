@@ -16,7 +16,13 @@ import os
 from collections import Counter
 
 import pandas as pd
-from sklearn.metrics import f1_score, accuracy_score, classification_report
+from scipy.stats import spearmanr
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
+    mean_absolute_error,
+)
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA = os.path.join(REPO, "data")
@@ -40,6 +46,19 @@ def evaluate_file(path: str) -> dict:
     if not rows:
         return None
 
+    # Resumed prediction jobs may contain an earlier null record followed by a
+    # successful retry for the same case. Keep one record per case, preferring
+    # the latest valid prediction, so transport failures cannot bias metrics.
+    by_filename = {}
+    anonymous = []
+    for row in rows:
+        filename = row.get("Filename")
+        if filename is None:
+            anonymous.append(row)
+        elif row.get("prediction") is not None or filename not in by_filename:
+            by_filename[filename] = row
+    rows = list(by_filename.values()) + anonymous
+
     valid = [r for r in rows if r.get("prediction") is not None and r.get("importance") is not None]
     if not valid:
         return None
@@ -52,6 +71,13 @@ def evaluate_file(path: str) -> dict:
 
     macro_f1 = f1_score(true, pred, average="macro", zero_division=0)
     acc = accuracy_score(true, pred)
+    balanced_acc = balanced_accuracy_score(true, pred)
+    mae = mean_absolute_error(true, pred)
+    src = None
+    if len(set(true)) > 1 and len(set(pred)) > 1:
+        correlation = spearmanr(true, pred).statistic
+        if pd.notna(correlation):
+            src = round(float(correlation), 4)
 
     # per-class F1
     labels = sorted(set(true) | set(pred))
@@ -64,6 +90,9 @@ def evaluate_file(path: str) -> dict:
         "n_null": n_null,
         "macro_f1": round(macro_f1, 4),
         "accuracy": round(acc, 4),
+        "balanced_accuracy": round(balanced_acc, 4),
+        "mae": round(mae, 4),
+        "spearman": src,
         "pred_dist": dict(sorted(Counter(pred).items())),
         "true_dist": dict(sorted(Counter(true).items())),
         **per_class_f1,
@@ -76,7 +105,12 @@ def parse_filename(fname: str) -> dict:
     parts = base.split("_")
     # filename format: {condition}[_cot][_text{N}]_{split}_{model}
     # find split (test or valid)
-    split = "test" if "test" in parts else "valid"
+    if "test" in parts:
+        split = "test"
+    elif "valid" in parts:
+        split = "valid"
+    else:
+        return None
     split_idx = parts.index(split)
     model = "_".join(parts[split_idx + 1:])
 
@@ -109,6 +143,8 @@ def main():
             continue
         for fpath in sorted(glob.glob(os.path.join(result_dir, "*.jsonl"))):
             meta = parse_filename(fpath)
+            if meta is None:
+                continue
             if args.split and meta["split"] != args.split:
                 continue
             metrics = evaluate_file(fpath)
@@ -127,7 +163,7 @@ def main():
 
     df = pd.DataFrame(records)
     display_cols = ["article", "condition", "split", "model", "n_total", "n_null",
-                    "macro_f1", "accuracy"]
+                    "macro_f1", "balanced_accuracy", "accuracy", "mae", "spearman"]
     per_class_cols = [c for c in df.columns if c.startswith("f1_imp")]
     display_cols += sorted(per_class_cols)
 
